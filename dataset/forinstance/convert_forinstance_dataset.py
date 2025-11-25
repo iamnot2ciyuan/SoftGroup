@@ -85,17 +85,27 @@ def convert_las_to_pth(data_root, save_root, split='train'):
             if hasattr(las, 'classification'):
                 raw_cls = np.array(las.classification, dtype=np.int32)
                 
-                # 映射规则 (FOR-instance -> SoftGroup)
-                # 原始: 0:Unclassified, 1:Low-vegetation, 2:Terrain, 3:Out-points, 4:Stem, 5:Live-branches, 6:Woody-branches
-                # SoftGroup 0-based: 0=low_vegetation, 1=terrain, 2=tree
-                mask_low_veg = (raw_cls == 1)
-                mask_terrain = (raw_cls == 2)
-                mask_tree = (raw_cls == 4) | (raw_cls == 5) | (raw_cls == 6)
+                # 官方映射逻辑:
+                # Terrain -> 1 (我们映射为 1: Terrain)
+                # Low Veg -> 2 (我们映射为 0: Low_Veg)
+                # Stem -> 3 (合并为 Tree -> 2)
+                # Woody Branch -> 4 (合并为 Tree -> 2)
+                # Live Branch -> 5 (合并为 Tree -> 2)
                 
-                semantic_label[mask_low_veg] = 0  # Low-vegetation -> 0 (0-based)
-                semantic_label[mask_terrain] = 1  # Terrain -> 1 (0-based)
-                semantic_label[mask_tree] = 2     # Tree -> 2 (0-based)
-
+                # SoftGroup 目标: 0=Low_Veg, 1=Terrain, 2=Tree (3类方案)
+                # 注意：LAS 文件中的 classification 值需要根据实际情况确认
+                # 这里假设：1=Low Veg, 2=Terrain, 4/5/6=Tree parts (Stem/Woody/Live)
+                
+                mask_low_veg = (raw_cls == 1)  # 假设 1 是 Low Veg
+                mask_terrain = (raw_cls == 2)   # 假设 2 是 Terrain
+                
+                # 关键：所有树的部分合并为 Tree (Class 2)
+                # Stem, Woody, Live 分别是 4, 5, 6 (或其他 ID，视 LAS 具体情况)
+                # 如果不确定，最稳妥的方法是利用 TreeID：只要有 TreeID，就是 Tree
+                
+                semantic_label[mask_low_veg] = 0
+                semantic_label[mask_terrain] = 1
+            
             # --- E. 处理实例标签 (Instance) ---
             # 初始化为 -100 (Ignore)
             instance_label = np.full(xyz.shape[0], -100, dtype=np.int32)
@@ -117,8 +127,9 @@ def convert_las_to_pth(data_root, save_root, split='train'):
                     
                     instance_label[mask] = new_inst_id
                     
-                    # 强制修正语义: 有 TreeID 的点必须是 Tree (语义类别 2, 0-based)
-                    semantic_label[mask] = 2
+                    # 🚨 关键：强制修正语义 - 有 TreeID 的点必须是 Tree (Class 2)
+                    # 这确保了所有树的部分（Stem, Woody, Live）都被正确标记为 Tree
+                    semantic_label[mask] = 2  # 对应 Config 的 tree
 
             # --- F. 保存为 PTH ---
             file_name = osp.basename(las_path).replace('.las', '.pth')

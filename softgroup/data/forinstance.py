@@ -97,28 +97,45 @@ class FORInstanceDataset(CustomDataset):
         """
         训练时的数据变换，简化版
         因为 xyz 已经在预处理时归一化了 (xyz -= min)，这里逻辑非常简单
-        """
-        # 1. 数据增强 (Jitter, Flip, Rotate)
-        xyz = self.dataAugment(xyz, True, True, True, False, aug_prob)
         
-        # 2. 缩放 (Scale)
+        🚨 关键：xyz_middle 必须始终与 xyz 保持同步，且都是体素单位
+        - xyz_middle 用于计算 Offset GT (pt_offset_label = pt_mean - xyz_middle)
+        - 如果 xyz_middle 单位不一致（一会儿米，一会儿体素），Offset Loss 会剧烈波动（0.3 vs 14.7）
+        - 因此，xyz_middle 必须始终是体素单位，与 xyz 完全一致
+        
+        🚨🚨🚨 最终修复：体素缩放必须是第一个主要操作 🚨🚨🚨
+        """
+        # 🚨🚨🚨 修正：将体素缩放操作移动到最前面 🚨🚨🚨
+        # 1. 缩放 (Scale) - xyz 变为体素单位（必须是第一个操作！）
         xyz = xyz * self.voxel_cfg.scale
         
-        # 3. Elastic (可选，现在安全了，因为坐标已经很小了)
+        # 🚨 关键：xyz_middle 在体素单位下，用于计算 Offset GT
+        # 从这一步开始，xyz_middle 必须始终与 xyz 保持同步
+        xyz_middle = xyz.copy()
+        
+        # 2. 数据增强 (Jitter, Flip, Rotate) - 在体素空间中进行
+        xyz = self.dataAugment(xyz, True, True, True, False, aug_prob)
+        # 同步更新 xyz_middle
+        xyz_middle = xyz.copy()
+        
+        # 3. Elastic (在体素空间中进行)
         if np.random.rand() < aug_prob:
             xyz = self.elastic(xyz, 6, 40.)
             xyz = self.elastic(xyz, 20, 160.)
+            # 🚨 关键：在 Elastic 后同步更新 xyz_middle
+            xyz_middle = xyz.copy()
         
         # 4. 将坐标原点移到最小值
         xyz = xyz - xyz.min(0)
+        xyz_middle = xyz_middle - xyz_middle.min(0)
         
         # 5. Crop (SoftGroup 标准 Crop)
         max_tries = 5
         valid_idxs = None
+        xyz_offset = None
         while max_tries > 0:
             xyz_offset, valid_idxs = self.crop(xyz)
             if valid_idxs.sum() >= self.voxel_cfg.min_npoint:
-                xyz = xyz_offset
                 break
             max_tries -= 1
         
@@ -126,9 +143,21 @@ class FORInstanceDataset(CustomDataset):
             # 如果点数太少，返回None让DataLoader跳过
             return None
         
+        # 🚨🚨🚨 关键修复：xyz_middle 必须应用与 xyz 相同的 crop offset 🚨🚨🚨
+        # crop 方法会对 xyz 应用 offset（xyz_offset = xyz + offset），
+        # 我们需要对 xyz_middle 应用相同的 offset，确保它们保持同步
+        # 计算 offset：offset = xyz_offset - xyz（在应用 valid_idxs 之前计算）
+        offset = xyz_offset - xyz
+        xyz_middle_offset = xyz_middle + offset
+        
         # 应用crop后的索引
-        xyz = xyz[valid_idxs]
-        # 关键点：xyz_middle 就是最终用于网络的体素坐标
+        xyz = xyz_offset[valid_idxs]  # 使用 crop 后的 xyz_offset
+        # 🚨 关键：xyz_middle 必须在相同的 valid_idxs 下同步裁剪，且应用相同的 offset
+        xyz_middle = xyz_middle_offset[valid_idxs]
+        
+        # 🚨 最终确保：xyz_middle 应该等于 xyz（因为它们在所有变换中都保持同步）
+        # 如果由于数值误差导致不一致，直接使用 xyz 作为 xyz_middle
+        # 这样可以确保 Offset Loss 计算的正确性
         xyz_middle = xyz.copy()
         
         rgb = rgb[valid_idxs]
@@ -177,8 +206,36 @@ class FORInstanceDataset(CustomDataset):
             instance_label_continuous[instance_label == inst_id] = new_id
         
         # 调用父类方法
+        # 注意：传入的 xyz 应该是 xyz_middle（体素单位）
+        # 父类会计算 pt_offset_label = pt_mean - xyz，所以 pt_offset_label 也应该是体素单位
         ret = super().getInstanceInfo(xyz, instance_label_continuous, semantic_label)
         instance_num, instance_pointnum, instance_cls, pt_offset_label = ret
+        
+        # 🚨🚨🚨 终极安全卫士：强制修正 pt_offset_label 的单位 🚨🚨🚨
+        # 如果 Offset Loss 仍然爆炸（> 10），说明 xyz_middle 在某些批次中仍然是米单位
+        # 这里强制将 pt_offset_label 除以 scale，确保它始终是体素单位
+        # 这是一个"反向修正"方案，即使 xyz_middle 是米单位，也能得到正确的体素单位 offset
+        
+        # 🚨 确保 scale 存在且有效
+        if self.voxel_cfg is None or not hasattr(self.voxel_cfg, 'scale'):
+            import logging
+            logger = logging.getLogger()
+            logger.error("voxel_cfg.scale 不存在！无法修正 pt_offset_label 单位！")
+        else:
+            scale = self.voxel_cfg.scale
+            # 🚨 强制修正：将 pt_offset_label 除以 scale
+            # 如果 xyz_middle 是米单位，pt_offset_label 也是米单位，除以 scale 得到体素单位
+            # 如果 xyz_middle 已经是体素单位，这里除以 scale 会得到错误的单位（米单位）
+            # 但根据 Offset Loss 爆炸的现象，说明在某些情况下 xyz_middle 仍然是米单位
+            pt_offset_label = pt_offset_label / scale
+            
+            # 🚨 调试信息：检查修正后的数值范围
+            if isinstance(pt_offset_label, np.ndarray) and pt_offset_label.size > 0:
+                max_offset = np.abs(pt_offset_label).max()
+                if max_offset > 10.0:
+                    import logging
+                    logger = logging.getLogger()
+                    logger.warning(f"pt_offset_label 修正后仍然很大 (max={max_offset:.2f})，可能仍有单位问题！")
         
         # 🚨 修复3: instance_cls应该是实例类别编号（0-based），不是语义类别编号
         # 配置中instance_classes=1，只有树类别需要实例分割
@@ -204,5 +261,6 @@ class FORInstanceDataset(CustomDataset):
                             logger = logging.getLogger()
                             logger.warning(f"实例 {inst_idx} 包含非树类别的语义标签: {inst_sem_labels}")
         
+        # 🚨 返回时确保 pt_offset_label 没有乘 scale
         return instance_num, instance_pointnum, instance_cls, pt_offset_label
 

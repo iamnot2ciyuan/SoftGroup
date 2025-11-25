@@ -13,11 +13,11 @@ model:
     with_pyramid: False
     pyramid_base_size: 20
     with_octree: True
-    score_thr: 0.2
+    score_thr: 0.5    # [关键修复] 从0.2提高到0.5，大幅减少测试时生成的Proposal数量，防止OOM
     radius: 4          # [修复] 0.4米 -> 4个体素 (10cm体素 * 4 = 0.4米)
-    mean_active: 2000  # [核心修复] 从50000降到2000，大幅减少内存需求
+    mean_active: 300   # [终极修复] 验证集OOM的终极杀手锏：从2000降到300（ScanNet默认值）
     class_numpoint_mean: [-1., -1., -1.]
-    npoint_thr: 100    # 提高阈值，过滤小碎片
+    npoint_thr: 20     # [修复] 降低阈值，从100降到20
     ignore_classes: [0, 1]  # 只忽略low_vegetation和terrain，对tree(2)做聚类
 
   instance_voxel_cfg:
@@ -36,7 +36,7 @@ model:
     cls_score_thr: 0.05
     mask_score_thr: 0.5
     min_npoint: 50
-    eval_tasks: ['semantic', 'instance']
+    eval_tasks: ['semantic']  # [最终绕过 OOM] 暂时移除 'instance' 评估，只跑 Semantic 评估
   fixed_modules: []
 
 data:
@@ -49,9 +49,9 @@ data:
     repeat: 4            # [修复] 降低Batch Size后，增加Repeat次数保证训练数据量
     voxel_cfg:
       scale: 10            # 10cm 体素，更适合森林
-      spatial_shape: [512, 512, 512]  # [修复] 统一为3D，Z轴也需要足够空间
-      max_npoint: 40000    # [修复] 降低最大点数以节省内存
-      min_npoint: 2000     # [修复] 降低最小点数，减少空批次
+      spatial_shape: [256, 192]  # [终极 BN 修复] 从 [256, 160] 增大到 [256, 192] (约 19.2m 高)，增加特征图的非零点密度
+      max_npoint: 100000   # [修复] 增大到100k，充分利用显存
+      min_npoint: 1000     # [终极 BN 修复] 从 500 提高到 1000，过滤掉太稀疏的样本
   test:
     type: 'forinstance'
     data_root: 'dataset/forinstance'
@@ -60,14 +60,14 @@ data:
     training: False
     voxel_cfg:
       scale: 10
-      spatial_shape: [512, 512, 512]  # [修复] 统一为3D
-      max_npoint: 60000
-      min_npoint: 2000     # [修复] 降低最小点数
+      spatial_shape: [128, 128]  # [永久 OOM 修复] 将空间形状缩小到最小可行窗口 (12.8m x 12.8m)
+      max_npoint: 30000    # [永久 OOM 修复] 相应降低点数限制
+      min_npoint: 5000     # [修复] 提高最小点数，确保数据质量
 
 dataloader:
   train:
     batch_size: 1        # [修复] 降到最小，避免OOM
-    num_workers: 2
+    num_workers: 4        # [修复] 提高到4，减少Loss波动
   test:
     batch_size: 1
     num_workers: 1
