@@ -1,0 +1,136 @@
+2025-11-25 15:35:30,064 - INFO - Config:
+model:
+  channels: 32
+  num_blocks: 6        # [关键修复] 从 7 改为 6，减少一层下采样，避免BatchNorm错误
+  semantic_classes: 3   # 0=low_vegetation, 1=terrain, 2=tree
+  instance_classes: 1   # 全部树归为1类实例
+  sem2ins_classes: [2]  # 对语义类别2（tree）做实例分割
+  semantic_only: False
+  semantic_weight: [1.0, 1.0, 1.0]
+  ignore_label: -100
+  with_coords: True
+
+  grouping_cfg:
+    with_pyramid: False
+    pyramid_base_size: 20
+    with_octree: True
+    score_thr: 0.2
+    radius: 4          # [修复] 0.4米 -> 4个体素 (10cm体素 * 4 = 0.4米)
+    mean_active: 2000  # [核心修复] 从50000降到2000，大幅减少内存需求
+    class_numpoint_mean: [-1., -1., -1.]
+    npoint_thr: 100    # 提高阈值，过滤小碎片
+    ignore_classes: [0, 1]  # 只忽略low_vegetation和terrain，对tree(2)做聚类
+
+  instance_voxel_cfg:
+    scale: 10            # 10cm体素，更适合森林
+    spatial_shape: 512
+
+  train_cfg:
+    lvl_fusion: True
+    max_proposal_num: 1000
+    pos_iou_thr: 0.5
+    match_low_quality: True
+    min_pos_thr: 0.3
+
+  test_cfg:
+    x4_split: False
+    cls_score_thr: 0.05
+    mask_score_thr: 0.5
+    min_npoint: 50
+    eval_tasks: ['semantic', 'instance']
+  fixed_modules: []
+
+data:
+  train:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'train'
+    suffix: '.las'
+    training: True
+    repeat: 4            # [修复] 降低Batch Size后，增加Repeat次数保证训练数据量
+    voxel_cfg:
+      scale: 10            # 10cm 体素，更适合森林
+      spatial_shape: [512, 512, 512]  # [修复] 统一为3D，Z轴也需要足够空间
+      max_npoint: 40000    # [修复] 降低最大点数以节省内存
+      min_npoint: 2000     # [修复] 降低最小点数，减少空批次
+  test:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'val'
+    suffix: '.las'
+    training: False
+    voxel_cfg:
+      scale: 10
+      spatial_shape: [512, 512, 512]  # [修复] 统一为3D
+      max_npoint: 60000
+      min_npoint: 2000     # [修复] 降低最小点数
+
+dataloader:
+  train:
+    batch_size: 1        # [修复] 降到最小，避免OOM
+    num_workers: 2
+  test:
+    batch_size: 1
+    num_workers: 1
+
+optimizer:
+  type: 'Adam'
+  lr: 0.002
+
+loss_weights:
+  semantic_loss: 1.0
+  offset_loss: 0.1
+  cls_loss: 1.0
+  mask_loss: 1.0
+  iou_score_loss: 1.0
+
+fp16: False
+epochs: 108
+step_epoch: 20
+save_freq: 4
+log_interval: 10
+
+2025-11-25 15:35:30,064 - INFO - Distributed: False
+2025-11-25 15:35:30,064 - INFO - Mix precision training: False
+2025-11-25 15:35:35,559 - INFO - Load train dataset: 40 scans
+2025-11-25 15:35:35,562 - INFO - Load test dataset: 11 scans
+2025-11-25 15:35:35,564 - INFO - Training
+2025-11-25 15:37:13,268 - WARNING - Skip empty batch at iteration 5
+2025-11-25 15:37:26,360 - WARNING - Skip empty batch at iteration 6
+2025-11-25 15:38:03,591 - WARNING - Skip empty batch at iteration 7
+2025-11-25 15:38:09,541 - INFO - Epoch [1/108][10/40]  lr: 0.002, eta: 1 day, 2:20:04, mem: 663, data_time: 0.00, iter_time: 0.12, semantic_loss: 1.0805, offset_loss: 18.8483, cls_loss: 0.5737, mask_loss: 0.0000, iou_score_loss: 0.0000, num_pos: 0.0000, num_neg: 2.0000, loss: 20.5025
+2025-11-25 15:39:43,518 - WARNING - Skip empty batch at iteration 17
+2025-11-25 15:40:14,466 - INFO - Epoch [1/108][20/40]  lr: 0.002, eta: 20:49:14, mem: 663, data_time: 0.00, iter_time: 0.26, semantic_loss: 1.0348, offset_loss: 16.2019, cls_loss: 0.3958, mask_loss: 0.0000, iou_score_loss: 0.0000, num_pos: 0.0000, num_neg: 3.0000, loss: 17.6325
+2025-11-25 15:41:00,208 - WARNING - Skip empty batch at iteration 21
+2025-11-25 15:41:00,209 - WARNING - Skip empty batch at iteration 22
+2025-11-25 15:42:06,703 - WARNING - Skip empty batch at iteration 26
+2025-11-25 15:42:46,914 - WARNING - Skip empty batch at iteration 28
+2025-11-25 15:42:48,931 - WARNING - Skip empty batch at iteration 29
+2025-11-25 15:43:33,588 - WARNING - Skip empty batch at iteration 30
+2025-11-25 15:43:53,731 - WARNING - Skip empty batch at iteration 33
+2025-11-25 15:44:21,966 - WARNING - Skip empty batch at iteration 35
+2025-11-25 15:44:50,705 - WARNING - Skip empty batch at iteration 36
+2025-11-25 15:46:13,254 - WARNING - Skip empty batch at iteration 40
+2025-11-25 15:46:13,427 - WARNING - NaN or Inf found in input tensor.
+2025-11-25 15:46:13,428 - WARNING - NaN or Inf found in input tensor.
+2025-11-25 15:46:13,962 - INFO - Validation
+  0%|          | 0/11 [00:00<?, ?it/s]  9%|▉         | 1/11 [00:06<01:01,  6.17s/it] 18%|█▊        | 2/11 [00:20<01:39, 11.07s/it] 27%|██▋       | 3/11 [00:30<01:23, 10.48s/it] 36%|███▋      | 4/11 [00:46<01:29, 12.85s/it] 45%|████▌     | 5/11 [01:06<01:32, 15.42s/it] 55%|█████▍    | 6/11 [01:24<01:20, 16.13s/it] 64%|██████▎   | 7/11 [01:39<01:02, 15.69s/it] 73%|███████▎  | 8/11 [01:58<00:50, 16.81s/it] 82%|████████▏ | 9/11 [02:12<00:31, 15.87s/it] 91%|█████████ | 10/11 [02:26<00:15, 15.30s/it]100%|██████████| 11/11 [02:40<00:00, 15.03s/it]100%|██████████| 11/11 [02:40<00:00, 14.62s/it]
+2025-11-25 15:48:54,770 - INFO - Evaluate instance segmentation
+2025-11-25 15:49:26,108 - INFO - AP: 0.000. AP_50: 0.000. AP_25: 0.000
+2025-11-25 15:49:26,109 - INFO - Evaluate semantic segmentation and offset MAE
+2025-11-25 15:49:29,059 - INFO - Class-wise mIoU: 3.1 4.5 1.2
+2025-11-25 15:49:29,059 - INFO - mIoU: 2.9
+2025-11-25 15:49:30,446 - INFO - Acc: 6.0
+2025-11-25 15:49:34,509 - INFO - Offset MAE: 5365799925.719
+2025-11-25 15:49:34,579 - INFO - Summary name val/Offset MAE is illegal; using val/Offset_MAE instead.
+
+################################################################
+what           :      AP  AP_50%  AP_25%      AR  RC_50%  RC_25%
+################################################################
+low_vegetation :   0.000   0.000   0.000   0.000   0.000   0.000
+terrain        :   0.000   0.000   0.000   0.000   0.000   0.000
+tree           :   0.000   0.000   0.000   0.000   0.000   0.000
+----------------------------------------------------------------
+average        :   0.000   0.000   0.000   0.000   0.000   0.000
+################################################################
+
