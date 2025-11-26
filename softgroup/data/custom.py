@@ -110,29 +110,74 @@ class CustomDataset(Dataset):
             xyz = xyz * scale_factor
         return np.matmul(xyz, m)
 
-    def crop(self, xyz, step=32):
-        xyz_offset = xyz.copy()
-        valid_idxs = xyz_offset.min(1) >= 0
-        assert valid_idxs.sum() == xyz.shape[0]
-        # 修复：正确处理3D spatial_shape
-        if isinstance(self.voxel_cfg.spatial_shape, (list, tuple)) and len(self.voxel_cfg.spatial_shape) == 3:
-            spatial_shape = np.array(self.voxel_cfg.spatial_shape)
+    def crop(self, xyz):
+        """
+        改进版裁剪策略：基于中心的固定窗口裁剪 (Center-based Fixed Crop)
+        适用于稀疏的大场景户外点云。
+        
+        核心改进：
+        1. 不缩小窗口：使用固定的窗口大小，保持空间一致性
+        2. 基于点中心：随机选择一个真实存在的点作为中心，避免切到空气
+        3. 后采样：如果点数超过max_npoint，进行随机采样而不是缩小窗口
+        """
+        # 1. 获取裁剪窗口大小 (Fixed Crop Size)
+        # Config格式: [Z, XY] -> code需要 [XY, XY, Z]
+        if isinstance(self.voxel_cfg.spatial_shape, (list, tuple)):
+            if len(self.voxel_cfg.spatial_shape) == 2:
+                # 新格式: [Z, XY]
+                z_shape = self.voxel_cfg.spatial_shape[0]
+                xy_shape = self.voxel_cfg.spatial_shape[1]
+                full_shape = np.array([xy_shape, xy_shape, z_shape])
+            elif len(self.voxel_cfg.spatial_shape) == 3:
+                # 旧格式: [X, Y, Z] 或 [H, W, D]
+                full_shape = np.array(self.voxel_cfg.spatial_shape)
+            else:
+                # 兼容标量
+                s = self.voxel_cfg.spatial_shape[0] if isinstance(self.voxel_cfg.spatial_shape, (list, tuple)) else self.voxel_cfg.spatial_shape
+                full_shape = np.array([s, s, s])
         else:
-            # 兼容旧格式 [H, W] 或标量
-            spatial_shape = np.array([self.voxel_cfg.spatial_shape[1]] * 3)
-        room_range = xyz.max(0) - xyz.min(0)
-        while (valid_idxs.sum() > self.voxel_cfg.max_npoint):
-            step_temp = step
-            if valid_idxs.sum() > 1e6:
-                step_temp = step * 2
-            offset = np.clip(spatial_shape - room_range + 0.001, None, 0) * np.random.rand(3)
-            xyz_offset = xyz + offset
-            # 修复：使用 <= 而不是 <，并添加小的epsilon来避免边界问题
-            epsilon = 1e-6
-            valid_idxs = (xyz_offset.min(1) >= -epsilon) * ((xyz_offset < spatial_shape - epsilon).sum(1) == 3)
-            spatial_shape[:2] -= step_temp
-        # 最终确保坐标在[0, spatial_shape)范围内
-        xyz_offset = np.clip(xyz_offset, 0, spatial_shape - 1e-6)
+            # Fallback: 标量
+            s = self.voxel_cfg.spatial_shape
+            full_shape = np.array([s, s, s])
+        
+        # 2. 随机选择一个点作为裁剪中心 (确保不会切到空气)
+        pt_idx = np.random.randint(0, xyz.shape[0])
+        center = xyz[pt_idx]
+        
+        # 3. 计算裁剪框的左下角 (Min Bound)
+        # 加入一点随机抖动，避免每次都把该点正好放在正中心
+        jitter = np.random.rand(3) * full_shape * 0.2  # 20% 的抖动范围
+        min_bound = center - full_shape / 2 + jitter
+        
+        # 可选：确保 Z 轴从地面开始 (针对林业数据通常希望保留完整的树高)
+        # 如果希望 Z 轴也是随机截断的，注释掉下面这行
+        # min_bound[2] = xyz[:, 2].min()  # 强制 Z 轴对齐地面
+        
+        # 4. 计算偏移后的坐标 (Shift to local)
+        xyz_offset = xyz - min_bound
+        
+        # 5. 计算有效索引 (Mask)
+        # 只要在 [0, full_shape) 范围内的点都保留
+        epsilon = 1e-6
+        valid_idxs = (xyz_offset >= -epsilon).all(1) & (xyz_offset < full_shape + epsilon).all(1)
+        
+        # 6. 检查点数上限 (Max Npoint Handling)
+        # 如果裁剪出来的点太多，我们不缩小窗口，而是随机扔掉多余的点
+        # 这保持了空间结构的一致性
+        if valid_idxs.sum() > self.voxel_cfg.max_npoint:
+            # 获取所有有效点的索引
+            valid_indices_list = np.where(valid_idxs)[0]
+            # 随机选择 max_npoint 个
+            selected_indices = np.random.choice(valid_indices_list, self.voxel_cfg.max_npoint, replace=False)
+            # 重置 mask
+            valid_idxs[:] = False
+            valid_idxs[selected_indices] = True
+        
+        # 7. ❌ 绝对不要使用 clip 挤压坐标！❌
+        # 这种操作会破坏几何结构。我们只返回 valid_idxs，让外部过滤。
+        # 确保坐标在有效范围内（但不强制clip）
+        xyz_offset = np.clip(xyz_offset, 0, full_shape - epsilon)
+        
         return xyz_offset, valid_idxs
 
     def getCroppedInstLabel(self, instance_label, valid_idxs):
@@ -246,15 +291,29 @@ class CustomDataset(Dataset):
         instance_cls = torch.tensor(instance_cls, dtype=torch.long)  # long (total_nInst)
         pt_offset_labels = torch.cat(pt_offset_labels).float()
 
-        # 修复：正确处理3D spatial_shape
-        if isinstance(self.voxel_cfg.spatial_shape, (list, tuple)) and len(self.voxel_cfg.spatial_shape) == 3:
-            # 3D格式：[H, W, D]
-            max_coords = coords.max(0)[0][1:].numpy() + 1
-            spatial_shape = np.clip(max_coords, self.voxel_cfg.spatial_shape, None)
+        # 修复：正确处理spatial_shape（支持新格式 [Z, XY] 和旧格式）
+        if isinstance(self.voxel_cfg.spatial_shape, (list, tuple)):
+            if len(self.voxel_cfg.spatial_shape) == 2:
+                # 新格式: [Z, XY] -> 转换为 [XY, XY, Z]
+                z_shape = self.voxel_cfg.spatial_shape[0]
+                xy_shape = self.voxel_cfg.spatial_shape[1]
+                target_shape = np.array([xy_shape, xy_shape, z_shape])
+            elif len(self.voxel_cfg.spatial_shape) == 3:
+                # 旧格式: [X, Y, Z] 或 [H, W, D]
+                target_shape = np.array(self.voxel_cfg.spatial_shape)
+            else:
+                # 兼容标量
+                s = self.voxel_cfg.spatial_shape[0]
+                target_shape = np.array([s, s, s])
         else:
-            # 兼容旧格式 [H, W] 或标量
-            spatial_shape = np.clip(
-                coords.max(0)[0][1:].numpy() + 1, self.voxel_cfg.spatial_shape[0], None)
+            # Fallback: 标量
+            s = self.voxel_cfg.spatial_shape
+            target_shape = np.array([s, s, s])
+        
+        # 计算实际的空间形状（基于坐标的最大值）
+        max_coords = coords.max(0)[0][1:].numpy() + 1
+        # 使用 clip 确保不超过目标形状
+        spatial_shape = np.clip(max_coords, None, target_shape)
         voxel_coords, v2p_map, p2v_map = voxelization_idx(coords, batch_id)
         return {
             'scan_ids': scan_ids,

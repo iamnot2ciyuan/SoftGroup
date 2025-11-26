@@ -129,35 +129,38 @@ class FORInstanceDataset(CustomDataset):
         xyz = xyz - xyz.min(0)
         xyz_middle = xyz_middle - xyz_middle.min(0)
         
-        # 5. Crop (SoftGroup 标准 Crop)
-        max_tries = 5
+        # 5. Crop (改进版：基于中心的固定窗口裁剪)
+        max_tries = 10  # 增加重试次数，因为新策略基于点中心，成功率更高
         valid_idxs = None
         xyz_offset = None
-        while max_tries > 0:
+        
+        for _ in range(max_tries):
+            # 调用新的 crop 方法
             xyz_offset, valid_idxs = self.crop(xyz)
+            
             if valid_idxs.sum() >= self.voxel_cfg.min_npoint:
                 break
-            max_tries -= 1
         
         if valid_idxs is None or valid_idxs.sum() < self.voxel_cfg.min_npoint:
             # 如果点数太少，返回None让DataLoader跳过
             return None
         
-        # 🚨🚨🚨 关键修复：xyz_middle 必须应用与 xyz 相同的 crop offset 🚨🚨🚨
-        # crop 方法会对 xyz 应用 offset（xyz_offset = xyz + offset），
-        # 我们需要对 xyz_middle 应用相同的 offset，确保它们保持同步
-        # 计算 offset：offset = xyz_offset - xyz（在应用 valid_idxs 之前计算）
-        offset = xyz_offset - xyz
-        xyz_middle_offset = xyz_middle + offset
+        # 应用 Crop
+        # 注意：这里使用 crop 返回的 xyz_offset (已经平移到了局部坐标 0,0,0)
+        xyz = xyz_offset[valid_idxs]
         
-        # 应用crop后的索引
-        xyz = xyz_offset[valid_idxs]  # 使用 crop 后的 xyz_offset
-        # 🚨 关键：xyz_middle 必须在相同的 valid_idxs 下同步裁剪，且应用相同的 offset
-        xyz_middle = xyz_middle_offset[valid_idxs]
-        
-        # 🚨 最终确保：xyz_middle 应该等于 xyz（因为它们在所有变换中都保持同步）
-        # 如果由于数值误差导致不一致，直接使用 xyz 作为 xyz_middle
-        # 这样可以确保 Offset Loss 计算的正确性
+        # 🚨 关键：xyz_middle 也必须应用同样的平移和过滤！
+        # 新的 crop 方法返回的 xyz_offset = xyz - min_bound，所以我们需要对 xyz_middle 做同样的平移
+        # 由于 crop 内部是随机计算的 offset，我们需要把 offset 传出来，或者
+        # 简单点：直接让 xyz_middle = xyz (因为它们在 Scale 后是完全一样的)
+        # 但为了保持一致性，我们需要计算 offset 并应用到 xyz_middle
+        # 由于新的 crop 方法内部计算了 min_bound，我们需要重新计算 offset
+        # 实际上，由于 xyz_middle 和 xyz 在 Scale 后完全一致，我们可以直接使用 xyz_offset
+        # 但为了安全，我们重新计算：找到裁剪框的 min_bound
+        # 由于 crop 方法返回的 xyz_offset = xyz - min_bound，所以 min_bound = xyz - xyz_offset
+        # 但这样计算会有精度问题，更简单的方法是：由于 xyz_middle 和 xyz 在 Scale 后完全一致
+        # 我们可以直接使用相同的 valid_idxs 和相同的偏移逻辑
+        # 最安全的方法：直接让 xyz_middle = xyz（因为它们在所有变换中都保持同步）
         xyz_middle = xyz.copy()
         
         rgb = rgb[valid_idxs]
