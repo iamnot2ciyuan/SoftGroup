@@ -1,0 +1,26 @@
+2025-11-28 00:55:26,290 - INFO - Load state dict from work_dirs/softgroup++_forinstance/epoch_108.pth
+2025-11-28 00:55:26,692 - INFO - Load test dataset: 11 scans
+  0%|          | 0/11 [00:00<?, ?it/s]2025-11-28 00:55:30,424 - WARNING - pt_offset_label 修正后仍然很大 (max=13.88)，可能仍有单位问题！
+  9%|▉         | 1/11 [00:06<01:02,  6.24s/it]2025-11-28 00:55:41,889 - WARNING - pt_offset_label 修正后仍然很大 (max=13.35)，可能仍有单位问题！
+ 18%|█▊        | 2/11 [00:22<01:48, 12.09s/it]2025-11-28 00:55:55,208 - WARNING - pt_offset_label 修正后仍然很大 (max=13.26)，可能仍有单位问题！
+ 27%|██▋       | 3/11 [00:33<01:32, 11.56s/it]2025-11-28 00:56:09,812 - WARNING - pt_offset_label 修正后仍然很大 (max=13.63)，可能仍有单位问题！
+ 36%|███▋      | 4/11 [00:50<01:35, 13.70s/it]2025-11-28 00:56:29,279 - WARNING - pt_offset_label 修正后仍然很大 (max=13.32)，可能仍有单位问题！
+ 45%|████▌     | 5/11 [01:11<01:37, 16.32s/it]2025-11-28 00:56:48,368 - WARNING - pt_offset_label 修正后仍然很大 (max=13.60)，可能仍有单位问题！
+ 55%|█████▍    | 6/11 [01:30<01:26, 17.21s/it]2025-11-28 00:57:05,726 - WARNING - pt_offset_label 修正后仍然很大 (max=13.45)，可能仍有单位问题！
+ 64%|██████▎   | 7/11 [01:45<01:05, 16.48s/it]2025-11-28 00:57:24,069 - WARNING - pt_offset_label 修正后仍然很大 (max=13.68)，可能仍有单位问题！
+ 73%|███████▎  | 8/11 [02:05<00:53, 17.81s/it]2025-11-28 00:57:41,007 - WARNING - pt_offset_label 修正后仍然很大 (max=13.51)，可能仍有单位问题！
+ 82%|████████▏ | 9/11 [02:20<00:33, 16.71s/it]2025-11-28 00:57:55,274 - WARNING - pt_offset_label 修正后仍然很大 (max=13.38)，可能仍有单位问题！
+ 91%|█████████ | 10/11 [02:33<00:15, 15.78s/it]2025-11-28 00:58:08,971 - WARNING - pt_offset_label 修正后仍然很大 (max=13.35)，可能仍有单位问题！
+100%|██████████| 11/11 [02:47<00:00, 15.26s/it]100%|██████████| 11/11 [02:48<00:00, 15.29s/it]
+Traceback (most recent call last):
+  File "/root/autodl-tmp/SoftGroup/tools/test.py", line 208, in <module>
+    main()
+  File "/root/autodl-tmp/SoftGroup/tools/test.py", line 152, in main
+    results = collect_results_cpu(results, len(dataset))
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/dist.py", line 88, in collect_results_cpu
+    dist.broadcast(dir_tensor, 0)
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/distributed/distributed_c10d.py", line 1186, in broadcast
+    default_pg = _get_default_group()
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/distributed/distributed_c10d.py", line 429, in _get_default_group
+    raise RuntimeError(
+RuntimeError: Default process group has not been initialized, please make sure to call init_process_group.

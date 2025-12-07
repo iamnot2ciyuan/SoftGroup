@@ -1,0 +1,9 @@
+predicted_masks/plot_1_annotated_000.txt 1 0.0234
+predicted_masks/plot_1_annotated_001.txt 1 0.0143
+predicted_masks/plot_1_annotated_002.txt 1 0.0098
+predicted_masks/plot_1_annotated_003.txt 1 0.0057
+predicted_masks/plot_1_annotated_004.txt 1 0.0074
+predicted_masks/plot_1_annotated_005.txt 1 0.0484
+predicted_masks/plot_1_annotated_006.txt 1 0.0135
+predicted_masks/plot_1_annotated_007.txt 1 0.0056
+predicted_masks/plot_1_annotated_008.txt 1 0.0088

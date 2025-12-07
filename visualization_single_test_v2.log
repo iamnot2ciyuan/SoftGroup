@@ -1,0 +1,11 @@
+2025-11-27 16:24:07,299 - INFO - Load state dict from work_dirs/softgroup++_forinstance/epoch_108.pth
+2025-11-27 16:24:07,717 - INFO - Load test dataset: 11 scans
+2025-11-27 16:24:10,999 - WARNING - pt_offset_label 修正后仍然很大 (max=13.88)，可能仍有单位问题！
+2025-11-27 16:24:13,277 - INFO - Processing sample 0/11
+2025-11-27 16:24:21,207 - WARNING - pt_offset_label 修正后仍然很大 (max=13.35)，可能仍有单位问题！
+2025-11-27 16:24:22,655 - INFO - [DEBUG] forward_grouping: 生成了 51218 个proposals, radius=20, score_thr=0.05
+2025-11-27 16:24:22,748 - INFO - Scan ID: plot_1_annotated
+2025-11-27 16:24:22,811 - INFO - Found 0 predicted instances
+2025-11-27 16:24:22,811 - WARNING - pred_instances list is empty for plot_1_annotated
+2025-11-27 16:24:25,045 - INFO - Saved GT instances for plot_1_annotated
+2025-11-27 16:24:25,045 - INFO - Results saved to visualization_results

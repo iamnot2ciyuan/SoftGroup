@@ -1,0 +1,31 @@
+2025-11-27 15:28:44,175 - INFO - Load state dict from work_dirs/softgroup++_forinstance/epoch_108.pth
+2025-11-27 15:28:44,691 - INFO - Load test dataset: 11 scans
+  0%|          | 0/11 [00:00<?, ?it/s]2025-11-27 15:28:48,642 - WARNING - pt_offset_label 修正后仍然很大 (max=13.88)，可能仍有单位问题！
+2025-11-27 15:28:58,637 - WARNING - pt_offset_label 修正后仍然很大 (max=13.35)，可能仍有单位问题！
+2025-11-27 15:29:01,242 - INFO - [DEBUG] forward_grouping: 生成了 66157 个proposals, radius=20, score_thr=0.05
+  9%|▉         | 1/11 [00:16<02:46, 16.67s/it]2025-11-27 15:29:09,498 - WARNING - pt_offset_label 修正后仍然很大 (max=13.26)，可能仍有单位问题！
+Traceback (most recent call last):
+  File "/root/autodl-tmp/SoftGroup/tools/test.py", line 208, in <module>
+    main()
+  File "/root/autodl-tmp/SoftGroup/tools/test.py", line 148, in main
+    result = model(batch)
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 110, in forward
+    return self.forward_test(**batch)
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/utils.py", line 171, in wrapper
+    return func(*new_args, **new_kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 375, in forward_test
+    proposals_idx, proposals_offset = self.forward_grouping(
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/fp16.py", line 58, in new_func
+    output = old_func(*new_args, **new_kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 491, in forward_grouping
+    neighbor_inds, start_len = ball_query(
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 55, in ball_query
+    return octree_ball_query(coords, mean_active, radius)
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 83, in octree_ball_query
+    n_totals = _get_ops().octree_ball_query(coords, boxes, pt_inds, pt_start_len, out_inds,
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call,so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1.
+  9%|▉         | 1/11 [00:33<05:38, 33.82s/it]

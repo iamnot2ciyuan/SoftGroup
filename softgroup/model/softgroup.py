@@ -172,7 +172,20 @@ class SoftGroup(nn.Module):
     @force_fp32(apply_to=('cls_scores', 'mask_scores', 'iou_scores'))
     def instance_loss(self, cls_scores, mask_scores, iou_scores, proposals_idx, proposals_offset,
                       instance_labels, instance_pointnum, instance_cls, instance_batch_idxs):
+        # 🚨 调试输出：检查输入
+        num_proposals_raw = proposals_idx.size(0)
+        num_gts_raw = (instance_cls != self.ignore_label).sum().item()
+        
         if proposals_idx.size(0) == 0 or (instance_cls != self.ignore_label).sum() == 0:
+            # 🚨 调试输出：记录为什么返回空loss
+            if proposals_idx.size(0) == 0:
+                import logging
+                logger = logging.getLogger()
+                logger.warning(f"[DEBUG] instance_loss: proposals_idx为空 (size=0)")
+            if (instance_cls != self.ignore_label).sum() == 0:
+                import logging
+                logger = logging.getLogger()
+                logger.warning(f"[DEBUG] instance_loss: 没有有效的GT实例 (instance_cls全部为ignore_label)")
             cls_loss = cls_scores.sum() * 0
             mask_loss = mask_scores.sum() * 0
             iou_score_loss = iou_scores.sum() * 0
@@ -187,8 +200,18 @@ class SoftGroup(nn.Module):
         proposals_idx = proposals_idx[:, 1].int().cuda()
         proposals_offset = proposals_offset.cuda()
 
+        # 🚨 关键修复：将 instance_labels 从 class_id * 1000 + instance_id 格式转换为连续的实例ID
+        # get_mask_iou_on_cluster 期望连续的实例ID（0, 1, 2, ...），而不是 class_id * 1000 + instance_id
+        instance_labels_continuous = instance_labels.clone()
+        unique_inst_ids = torch.unique(instance_labels)
+        unique_inst_ids = unique_inst_ids[unique_inst_ids != self.ignore_label]
+        
+        # 将 class_id * 1000 + instance_id 映射回连续ID
+        for idx, inst_id in enumerate(unique_inst_ids):
+            instance_labels_continuous[instance_labels == inst_id] = idx
+        
         # cal iou of clustered instance
-        ious_on_cluster = get_mask_iou_on_cluster(proposals_idx, proposals_offset, instance_labels,
+        ious_on_cluster = get_mask_iou_on_cluster(proposals_idx, proposals_offset, instance_labels_continuous,
                                                   instance_pointnum)
 
         # filter out background instances
@@ -204,6 +227,16 @@ class SoftGroup(nn.Module):
         # overlap > thr on fg instances are positive samples
         max_iou, argmax_iou = fg_ious_on_cluster.max(1)
         pos_inds = max_iou >= self.train_cfg.pos_iou_thr
+        
+        # 🚨 调试输出：记录IoU统计
+        if num_proposals > 0 and num_gts > 0:
+            import logging
+            logger = logging.getLogger()
+            max_iou_val = max_iou.max().item() if max_iou.numel() > 0 else 0.0
+            mean_iou_val = max_iou.mean().item() if max_iou.numel() > 0 else 0.0
+            pos_count = pos_inds.sum().item()
+            logger.info(f"[DEBUG] instance_loss: proposals={num_proposals}, gts={num_gts}, max_iou={max_iou_val:.4f}, mean_iou={mean_iou_val:.4f}, pos_iou_thr={self.train_cfg.pos_iou_thr}, pos_count={pos_count}")
+        
         assigned_gt_inds[pos_inds] = argmax_iou[pos_inds]
 
         # allow low-quality proposals with best iou to be as positive sample
@@ -212,9 +245,16 @@ class SoftGroup(nn.Module):
         min_pos_thr = getattr(self.train_cfg, 'min_pos_thr', 0)
         if match_low_quality:
             gt_max_iou, gt_argmax_iou = fg_ious_on_cluster.max(0)
+            low_quality_pos_count = 0
             for i in range(num_gts):
                 if gt_max_iou[i] >= min_pos_thr:
                     assigned_gt_inds[gt_argmax_iou[i]] = i
+                    low_quality_pos_count += 1
+            # 🚨 调试输出：记录low-quality匹配
+            if low_quality_pos_count > 0:
+                import logging
+                logger = logging.getLogger()
+                logger.info(f"[DEBUG] instance_loss: low_quality匹配增加了 {low_quality_pos_count} 个正样本 (min_pos_thr={min_pos_thr})")
 
         # compute cls loss. follow detection convention: 0 -> K - 1 are fg, K is bg
         labels = fg_instance_cls.new_full((num_proposals, ), self.instance_classes)
@@ -474,9 +514,17 @@ class SoftGroup(nn.Module):
         if len(proposals_idx_list) > 0:
             proposals_idx = torch.cat(proposals_idx_list, dim=0)
             proposals_offset = torch.cat(proposals_offset_list)
+            # 🚨 调试输出：记录生成的proposal数量
+            import logging
+            logger = logging.getLogger()
+            logger.info(f"[DEBUG] forward_grouping: 生成了 {proposals_idx.size(0)} 个proposals, radius={radius}, score_thr={self.grouping_cfg.score_thr}")
         else:
             proposals_idx = torch.zeros((0, 2), dtype=torch.int32)
             proposals_offset = torch.zeros((0, ), dtype=torch.int32)
+            # 🚨 调试输出：记录为什么没有生成proposal
+            import logging
+            logger = logging.getLogger()
+            logger.warning(f"[DEBUG] forward_grouping: 没有生成任何proposal! radius={radius}, score_thr={self.grouping_cfg.score_thr}, ignore_classes={self.grouping_cfg.ignore_classes}")
         return proposals_idx, proposals_offset
 
     def get_level(self, num_points):
@@ -582,14 +630,30 @@ class SoftGroup(nn.Module):
                 cur_cls_scores = cls_scores[:, i]
                 cur_iou_scores = iou_scores[:, i]
                 cur_mask_scores = mask_scores[:, i]
+                # [关键修复] mask_scores是logits，需要sigmoid转换为概率
+                cur_mask_scores = cur_mask_scores.sigmoid()
                 score_pred = cur_cls_scores * cur_iou_scores.clamp(0, 1)
+                # [调试] 打印mask_score统计
+                import logging
+                logger = logging.getLogger()
+                if cur_mask_scores.numel() > 0:
+                    logger.info(f'[DEBUG get_instances] mask_scores (after sigmoid): min={cur_mask_scores.min().item():.4f}, max={cur_mask_scores.max().item():.4f}, mean={cur_mask_scores.mean().item():.4f}, thr={self.test_cfg.mask_score_thr}')
+                    logger.info(f'[DEBUG get_instances] Before mask filter: {cur_mask_scores.numel()} proposals')
                 mask_pred = torch.zeros((num_instances, num_points), dtype=torch.int, device='cuda')
                 mask_inds = cur_mask_scores > self.test_cfg.mask_score_thr
+                logger.info(f'[DEBUG get_instances] After mask filter: {mask_inds.sum().item()} proposals')
                 cur_proposals_idx = proposals_idx[mask_inds].long()
                 mask_pred[cur_proposals_idx[:, 0], cur_proposals_idx[:, 1]] = 1
 
                 # filter low score instance
+                # [调试] 打印分数统计
+                import logging
+                logger = logging.getLogger()
+                if cur_cls_scores.numel() > 0:
+                    logger.info(f'[DEBUG get_instances] cls_scores: min={cur_cls_scores.min().item():.4f}, max={cur_cls_scores.max().item():.4f}, mean={cur_cls_scores.mean().item():.4f}, thr={self.test_cfg.cls_score_thr}')
+                    logger.info(f'[DEBUG get_instances] Before cls filter: {cur_cls_scores.numel()} proposals')
                 inds = cur_cls_scores > self.test_cfg.cls_score_thr
+                logger.info(f'[DEBUG get_instances] After cls filter: {inds.sum().item()} proposals')
                 cls_pred = cls_pred[inds]
                 score_pred = score_pred[inds]
                 mask_pred = mask_pred[inds]
@@ -619,7 +683,12 @@ class SoftGroup(nn.Module):
                     npoint = torch.cat(npoint_list)
                 else:
                     npoint = mask_pred.sum(1)
+                # [调试] 打印npoint统计
+                if npoint.numel() > 0:
+                    logger.info(f'[DEBUG get_instances] npoint: min={npoint.min().item()}, max={npoint.max().item()}, mean={npoint.float().mean().item():.1f}, thr={self.test_cfg.min_npoint}')
+                    logger.info(f'[DEBUG get_instances] Before npoint filter: {npoint.numel()} proposals')
                 inds = npoint >= self.test_cfg.min_npoint
+                logger.info(f'[DEBUG get_instances] After npoint filter: {inds.sum().item()} proposals')
                 cls_pred = cls_pred[inds]
                 score_pred = score_pred[inds]
                 mask_pred = mask_pred[inds]
