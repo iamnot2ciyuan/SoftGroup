@@ -461,7 +461,17 @@ class SoftGroup(nn.Module):
         batch_size = batch_idxs.max() + 1
         semantic_scores = semantic_scores.softmax(dim=-1)
 
-        radius = self.grouping_cfg.radius
+        # [核心修复] radius 单位转换：根据文档，radius 是米单位，但 coords_float 是体素单位
+        # 需要将 radius 从米单位转换为体素单位
+        # 如果 instance_voxel_cfg.scale 存在，voxel_size = 1 / scale
+        # radius_voxel = radius_meter / voxel_size = radius_meter * scale
+        if self.instance_voxel_cfg is not None and hasattr(self.instance_voxel_cfg, 'scale'):
+            voxel_size = 1.0 / self.instance_voxel_cfg.scale
+            radius = self.grouping_cfg.radius / voxel_size  # 米单位 -> 体素单位
+        else:
+            # 如果没有 scale 信息，假设 radius 已经是体素单位（向后兼容）
+            radius = self.grouping_cfg.radius
+        
         mean_active = self.grouping_cfg.mean_active
         npoint_thr = self.grouping_cfg.npoint_thr
         with_pyramid = getattr(self.grouping_cfg, 'with_pyramid', False)
@@ -483,10 +493,11 @@ class SoftGroup(nn.Module):
             if with_pyramid:
                 num_points = coords_.size(0)
                 level = self.get_level(num_points)
-                radius = self.grouping_cfg.radius * level
+                radius_level = radius * level  # 使用转换后的体素单位 radius
                 if level > 1 or not lvl_fusion:
                     coords_, pt_offsets_, batch_idxs_, l2p_map = self.pyramid_map(
                         coords_, pt_offsets_, batch_idxs_, level, base_size)
+                radius = radius_level  # 更新 radius 为 level 调整后的值
             batch_offsets_ = self.get_batch_offsets(batch_idxs_, batch_size)
             neighbor_inds, start_len = ball_query(
                 coords_ + pt_offsets_,

@@ -214,10 +214,12 @@ class FORInstanceDataset(CustomDataset):
         ret = super().getInstanceInfo(xyz, instance_label_continuous, semantic_label)
         instance_num, instance_pointnum, instance_cls, pt_offset_label = ret
         
-        # 🚨🚨🚨 终极安全卫士：强制修正 pt_offset_label 的单位 🚨🚨🚨
-        # 如果 Offset Loss 仍然爆炸（> 10），说明 xyz_middle 在某些批次中仍然是米单位
-        # 这里强制将 pt_offset_label 除以 scale，确保它始终是体素单位
-        # 这是一个"反向修正"方案，即使 xyz_middle 是米单位，也能得到正确的体素单位 offset
+        # 🚨🚨🚨 [核心修复] 修正 pt_offset_label 的单位 🚨🚨🚨
+        # 根据代码逻辑：
+        # 1. xyz_middle 在 getInstanceInfo 调用时已经是体素单位（因为 xyz = xyz * scale）
+        # 2. pt_offset_label = pt_mean - xyz_middle，所以也应该是体素单位
+        # 3. 但如果 xyz_middle 在某些情况下仍然是米单位，pt_offset_label 也会是米单位
+        # 4. 需要确保 pt_offset_label 始终是体素单位，以便与网络输出的 pt_offsets 匹配
         
         # 🚨 确保 scale 存在且有效
         if self.voxel_cfg is None or not hasattr(self.voxel_cfg, 'scale'):
@@ -226,19 +228,30 @@ class FORInstanceDataset(CustomDataset):
             logger.error("voxel_cfg.scale 不存在！无法修正 pt_offset_label 单位！")
         else:
             scale = self.voxel_cfg.scale
-            # 🚨 强制修正：将 pt_offset_label 除以 scale
-            # 如果 xyz_middle 是米单位，pt_offset_label 也是米单位，除以 scale 得到体素单位
-            # 如果 xyz_middle 已经是体素单位，这里除以 scale 会得到错误的单位（米单位）
-            # 但根据 Offset Loss 爆炸的现象，说明在某些情况下 xyz_middle 仍然是米单位
-            pt_offset_label = pt_offset_label / scale
-            
-            # 🚨 调试信息：检查修正后的数值范围
+            # 🚨 [核心修复] 检查并修正 pt_offset_label 的单位
+            # 如果 pt_offset_label 的最大值 > 10.0（体素单位），说明可能是米单位，需要除以 scale
+            # 正常情况下，体素单位的 offset 应该在 [-5, 5] 范围内（对于 0.5 米的实例中心偏移）
             if isinstance(pt_offset_label, np.ndarray) and pt_offset_label.size > 0:
                 max_offset = np.abs(pt_offset_label).max()
+                # 如果 offset 很大（> 10.0），可能是米单位，需要转换为体素单位
+                # 对于 10cm 体素，10.0 体素 = 1.0 米，这是合理的偏移范围上限
+                # 如果 offset > 10.0，很可能是米单位，需要除以 scale
                 if max_offset > 10.0:
                     import logging
                     logger = logging.getLogger()
-                    logger.warning(f"pt_offset_label 修正后仍然很大 (max={max_offset:.2f})，可能仍有单位问题！")
+                    logger.warning(f"pt_offset_label 数值过大 (max={max_offset:.2f})，可能是米单位，正在转换为体素单位...")
+                    pt_offset_label = pt_offset_label / scale
+                    max_offset_after = np.abs(pt_offset_label).max()
+                    if max_offset_after > 10.0:
+                        logger.warning(f"pt_offset_label 转换后仍然很大 (max={max_offset_after:.2f})，可能仍有单位问题！")
+                    else:
+                        logger.info(f"pt_offset_label 单位修正成功: {max_offset:.2f} -> {max_offset_after:.2f}")
+                # 如果 offset 在合理范围内（<= 10.0），假设已经是体素单位，不需要转换
+                # 但为了安全，仍然检查是否异常大（> 5.0），这可能表示单位问题
+                elif max_offset > 5.0:
+                    import logging
+                    logger = logging.getLogger()
+                    logger.warning(f"pt_offset_label 数值较大 (max={max_offset:.2f})，请检查单位是否正确")
         
         # 🚨 修复3: instance_cls应该是实例类别编号（0-based），不是语义类别编号
         # 配置中instance_classes=1，只有树类别需要实例分割

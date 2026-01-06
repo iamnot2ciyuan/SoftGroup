@@ -13,11 +13,18 @@ model:
     with_pyramid: False
     pyramid_base_size: 20
     with_octree: True
-    # [可视化诊断] 极低门槛，把所有能检测到的东西都画出来
-    score_thr: 0.05    # 只要有一点点像是树，就把它留下来！
-    # [可视化诊断] 测试时使用 20 (2.0米)，容忍 5米的 Offset 误差
-    radius: 20          # 20个体素 = 2.0米 (10cm体素 * 20 = 2.0米)
-    mean_active: 100   # [可视化诊断] 进一步降低以避免CUDA内存错误
+    # [核心修复] 降低 score_thr，让更多点参与聚类
+    score_thr: 0.2    # 从 0.05 提高到 0.2，平衡召回率和精度
+    # [核心修复] 大幅减小 radius，解决 CUDA 内存访问错误
+    # 原值 radius=20 太大（如果是体素单位，相当于 2.0米；如果是米单位，相当于 200个体素）
+    # 在密集点云中会搜索到过多点，超过 MAX_SAMPLES=1000 限制，导致 CUDA 内存访问错误
+    # 根据文档，radius 与 voxel_size 相关，应该是米单位
+    # ScanNet: radius=0.04米 (voxel_size=0.02m) = 2个体素
+    # STPLS3D: radius=0.9米 (voxel_size=0.33m) ≈ 2.7个体素
+    # 对于当前配置 (voxel_size=0.1m)，使用 radius=0.2米 = 2个体素，参考 ScanNet 的配置
+    # 考虑到森林场景中树冠可能较大，但为了稳定性，使用较小的值
+    radius: 0.2        # 0.2米 = 2个体素 (voxel_size=0.1m * 2 = 0.2米)，参考 ScanNet 的 radius=0.04 (2个体素)
+    mean_active: 300   # [核心修复] 恢复到 ScanNet 默认值，避免 CUDA 内存错误
     class_numpoint_mean: [-1., -1., -1.]
     # [可视化诊断] 允许小一点的树
     npoint_thr: 10     # 降低阈值，允许更小的树被检测
