@@ -46,10 +46,23 @@ def train(epoch, model, optimizer, scaler, train_loader, cfg, logger, writer):
         if batch is None:
             logger.warning(f'Skip empty batch at iteration {i}')
             continue
+            
         data_time.update(time.time() - end)
         cosine_lr_after_step(optimizer, cfg.optimizer.lr, epoch - 1, cfg.step_epoch, cfg.epochs)
+        
         with torch.cuda.amp.autocast(enabled=cfg.fp16):
             loss, log_vars = model(batch, return_loss=True)
+
+        # ==========================================================
+        # [新增] NaN/Inf 熔断机制：防止坏数据导致训练崩溃
+        # ==========================================================
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.warning(f'⚠️ Warning: NaN/Inf loss detected at Epoch {epoch} Iter {i}. Skipping this batch!')
+            del loss, log_vars
+            torch.cuda.empty_cache()
+            optimizer.zero_grad()
+            continue
+        # ==========================================================
 
         # meter_dict
         for k, v in log_vars.items():
@@ -60,10 +73,21 @@ def train(epoch, model, optimizer, scaler, train_loader, cfg, logger, writer):
         # backward
         optimizer.zero_grad()
         scaler.scale(loss).backward()
-        if cfg.get('clip_grad_norm', None):
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
+
+        # ==========================================================
+        # [修改] 正确的梯度裁剪流程 (AMP模式)
+        # 必须先 unscale 梯度，再进行 clip_grad_norm
+        # ==========================================================
+        scaler.unscale_(optimizer)
+        
+        # 获取配置中的裁剪阈值，如果没有设置，默认给一个 10.0 的安全值
+        clip_norm = cfg.get('clip_grad_norm', 10.0)
+        if clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_norm)
+            
         scaler.step(optimizer)
         scaler.update()
+        # ==========================================================
 
         # time and print
         remain_iter = len(train_loader) * (cfg.epochs - epoch + 1) - i
@@ -80,6 +104,7 @@ def train(epoch, model, optimizer, scaler, train_loader, cfg, logger, writer):
             for k, v in meter_dict.items():
                 log_str += f', {k}: {v.val:.4f}'
             logger.info(log_str)
+            
     writer.add_scalar('train/learning_rate', lr, epoch)
     for k, v in meter_dict.items():
         writer.add_scalar(f'train/{k}', v.avg, epoch)
@@ -96,6 +121,7 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
     progress_bar = tqdm(total=len(val_loader) * world_size, disable=not is_main_process())
     val_set = val_loader.dataset
     eval_tasks = cfg.model.test_cfg.eval_tasks
+    
     with torch.no_grad():
         model.eval()
         for i, batch in enumerate(val_loader):
@@ -103,11 +129,13 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
             results.append(result)
             progress_bar.update(world_size)
         progress_bar.close()
+        
         if cfg.dist:
             results = collect_results_cpu(results, len(val_set))
         else:
             # 非分布式模式下，results已经是完整结果
             pass
+            
     if is_main_process():
         for res in results:
             if 'semantic' in eval_tasks or 'panoptic' in eval_tasks:
@@ -122,16 +150,19 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
                 all_gt_insts.append(res['gt_instances'])
             if 'panoptic' in eval_tasks:
                 all_panoptic_preds.append(res['panoptic_preds'])
+                
         if 'instance' in eval_tasks:
             logger.info('Evaluate instance segmentation')
             eval_min_npoint = getattr(cfg, 'eval_min_npoint', None)
             scannet_eval = ScanNetEval(val_set.CLASSES, eval_min_npoint)
+            # 这里即使 all_pred_insts 包含空列表，ScanNetEval 也应该能处理
             eval_res = scannet_eval.evaluate(all_pred_insts, all_gt_insts)
             writer.add_scalar('val/AP', eval_res['all_ap'], epoch)
             writer.add_scalar('val/AP_50', eval_res['all_ap_50%'], epoch)
             writer.add_scalar('val/AP_25', eval_res['all_ap_25%'], epoch)
             logger.info('AP: {:.3f}. AP_50: {:.3f}. AP_25: {:.3f}'.format(
                 eval_res['all_ap'], eval_res['all_ap_50%'], eval_res['all_ap_25%']))
+                
         if 'panoptic' in eval_tasks:
             logger.info('Evaluate panoptic segmentation')
             eval_min_npoint = getattr(cfg, 'eval_min_npoint', None)
@@ -139,6 +170,7 @@ def validate(epoch, model, val_loader, cfg, logger, writer):
             eval_res = panoptic_eval.evaluate(all_panoptic_preds, all_sem_labels, all_inst_labels)
             writer.add_scalar('val/PQ', eval_res[0], epoch)
             logger.info('PQ: {:.1f}'.format(eval_res[0]))
+            
         if 'semantic' in eval_tasks:
             logger.info('Evaluate semantic segmentation and offset MAE')
             miou = evaluate_semantic_miou(all_sem_preds, all_sem_labels, cfg.model.ignore_label,

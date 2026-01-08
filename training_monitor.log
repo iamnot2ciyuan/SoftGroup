@@ -1,0 +1,58 @@
+=== 训练监控脚本启动 ===
+监控开始时间: Mon Jan  5 00:54:55 CST 2026
+
+===== 训练进程已停止 =====
+停止时间: Mon Jan  5 00:57:55 CST 2026
+检查最后50行日志中的错误:
+Traceback (most recent call last):
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call,so the stacktrace below might be incorrect.
+
+系统资源状态:
+              total        used        free      shared  buff/cache   available
+Mem:          503Gi        39Gi        22Gi       2.2Gi       442Gi       458Gi
+Swap:            0B          0B          0B
+
+Mon Jan  5 00:57:55 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.120                Driver Version: 550.120        CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA vGPU-32GB               On  |   00000000:C2:00.0 Off |                  N/A |
+| 30%   43C    P8             14W /  320W |       1MiB /  32760MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+日志文件最后20行:
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 110, in forward
+    return self.forward_test(**batch)
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/utils.py", line 171, in wrapper
+    return func(*new_args, **new_kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 375, in forward_test
+    proposals_idx, proposals_offset = self.forward_grouping(
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/fp16.py", line 58, in new_func
+    output = old_func(*new_args, **new_kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 491, in forward_grouping
+    neighbor_inds, start_len = ball_query(
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 55, in ball_query
+    return octree_ball_query(coords, mean_active, radius)
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 83, in octree_ball_query
+    n_totals = _get_ops().octree_ball_query(coords, boxes, pt_inds, pt_start_len, out_inds,
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call,so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1.
+  9%|▉         | 1/11 [00:39<06:36, 39.68s/it]
+监控脚本结束时间: Mon Jan  5 00:57:55 CST 2026

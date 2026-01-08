@@ -1,11 +1,14 @@
 model:
   channels: 32
-  num_blocks: 6        # [关键修复] 从 7 改为 6，减少一层下采样，避免BatchNorm错误
-  semantic_classes: 3   # 0=low_vegetation, 1=terrain, 2=tree
-  instance_classes: 1   # 全部树归为1类实例
-  sem2ins_classes: [2]  # 对语义类别2（tree）做实例分割
+  num_blocks: 5       # [保持] 6层结构，节省显存
+  semantic_classes: 3 # 0=low_veg, 1=terrain, 2=tree
+  instance_classes: 1 # tree (实例类别索引0)
+  # sem2ins_classes: [] # 不使用sem2ins，因为每棵树都需要聚类分割（不是每个场景只有一棵树）
+  # 注意：sem2ins_classes应该是实例类别索引，不是语义类别索引
+  # 原配置[2]是语义类别索引，不会匹配到实例类别索引范围[0, instance_classes)，已修复为空列表
+  sem2ins_classes: []
   semantic_only: False
-  semantic_weight: [2.0, 2.0, 1.0]  # [修复语义分割] 提高low_vegetation和terrain的权重，减少地面被误分类为树木
+  semantic_weight: [2.0, 2.0, 1.0] # [保持] 应对类别不平衡
   ignore_label: -100
   with_coords: True
 
@@ -13,97 +16,102 @@ model:
     with_pyramid: False
     pyramid_base_size: 20
     with_octree: True
-    # [核心修复] 降低 score_thr，让更多点参与聚类
-    score_thr: 0.2    # 从 0.05 提高到 0.2，平衡召回率和精度
-    # [核心修复] 大幅减小 radius，解决 CUDA 内存访问错误
-    # 原值 radius=20 太大（如果是体素单位，相当于 2.0米；如果是米单位，相当于 200个体素）
-    # 在密集点云中会搜索到过多点，超过 MAX_SAMPLES=1000 限制，导致 CUDA 内存访问错误
-    # 根据文档，radius 与 voxel_size 相关，应该是米单位
-    # ScanNet: radius=0.04米 (voxel_size=0.02m) = 2个体素
-    # STPLS3D: radius=0.9米 (voxel_size=0.33m) ≈ 2.7个体素
-    # 对于当前配置 (voxel_size=0.1m)，使用 radius=0.2米 = 2个体素，参考 ScanNet 的配置
-    # 考虑到森林场景中树冠可能较大，但为了稳定性，使用较小的值
-    radius: 0.2        # 0.2米 = 2个体素 (voxel_size=0.1m * 2 = 0.2米)，参考 ScanNet 的 radius=0.04 (2个体素)
-    mean_active: 300   # [核心修复] 恢复到 ScanNet 默认值，避免 CUDA 内存错误
+    
+    # [关键修改 1] 降低语义阈值
+    # 森林环境复杂，0.1 能召回更多细小的树枝，防止漏检
+    score_thr: 0.1 
+    
+    # [关键修改 2] 调整聚类半径
+    # 0.3m (3个体素) 是一个平衡点。
+    # 太小(0.2)会导致树冠碎裂；太大(0.6)会导致粘连。
+    radius: 0.3     
+    
+    # [关键修改 3] 恢复 Mean Active
+    # 300 是安全值，避免密集区域聚类失败
+    mean_active: 300 
+    
     class_numpoint_mean: [-1., -1., -1.]
-    # [可视化诊断] 允许小一点的树
-    npoint_thr: 10     # 降低阈值，允许更小的树被检测
-    ignore_classes: [0, 1]  # 只忽略low_vegetation和terrain，对tree(2)做聚类
+    npoint_thr: 20     # 忽略少于20个点的噪点簇
+    ignore_classes: [0, 1] 
 
   instance_voxel_cfg:
-    scale: 10            # 10cm体素，更适合森林
-    spatial_shape: 512
+    scale: 10            # 10cm 体素
+    # [关键修改 4] 修复 spconv 报错
+    # 必须是 32 的倍数。416 足够覆盖 35m 切块。
+    spatial_shape: 416   
 
   train_cfg:
     lvl_fusion: True
-    max_proposal_num: 1000
-    # [微调] 稍微提高门槛，追求质量
-    # 既然 Offset 精度已经提升到 1.7米，可以稍微提高 IoU 门槛
-    # 过滤掉那些纯粹是凑数的垃圾样本，让 Mask Loss 能学到更高质量的特征
+    max_proposal_num: 500 # 森林切块内树木一般不超过500棵
     pos_iou_thr: 0.1
     match_low_quality: True
-    # [微调] 稍微提高最小正样本阈值，追求质量
     min_pos_thr: 0.1
 
   test_cfg:
     x4_split: False
-    cls_score_thr: 0.01  # [可视化诊断] 极低门槛，几乎不过滤
-    mask_score_thr: 0.0001  # [关键修复] mask预测质量很低，需要极低阈值
-    min_npoint: 1        # [关键修复] mask预测质量很低，生成的mask点数很少，需要极低阈值
-    eval_tasks: ['semantic', 'instance']  # [可视化诊断] 务必包含 instance，否则不生成实例结果
+    cls_score_thr: 0.01 
+    mask_score_thr: 0.0001
+    min_npoint: 10     # 预测时忽略极小的碎片
+    eval_tasks: ['semantic', 'instance']
   fixed_modules: []
 
 data:
   train:
     type: 'forinstance'
-    data_root: 'dataset/forinstance'
+    data_root: 'dataset/forinstance/preprocess_tiled' # 指向切好块的数据路径
     prefix: 'train'
-    suffix: '.las'
+    suffix: '.pth'  # 注意：预处理生成的是 .pth
     training: True
-    repeat: 4            # [修复] 降低Batch Size后，增加Repeat次数保证训练数据量
+    repeat: 4       # 增加数据采样频率
+    
     voxel_cfg:
-      scale: 10            # 10cm 体素，更适合森林
-      # [核心修复] 新格式: [Z, XY] -> Z轴 256 (25.6米), XY轴 160 (16米)
-      # 这是一个固定的取景框，不会再动态缩小了
-      spatial_shape: [256, 160]
-      # 允许框内有更多点，防止采样导致的稀疏
-      max_npoint: 100000   # [修复] 增大到100k，充分利用显存
-      # 只要框到了 1000 个点以上就算有效批次
-      min_npoint: 1000     # [核心修复] 从 500 提高到 1000，过滤掉太稀疏的样本
+      scale: 10     # 10cm 体素
+      
+      # [关键修改 5] 彻底解决 "points vanished" 报错
+      # 1. 必须是 32 的倍数 (416 / 32 = 13)
+      # 2. 必须大于切块大小 (35m = 350 < 416)
+      # 3. 三维都写上，防止 Z 轴被自动压缩导致报错
+      spatial_shape: [416, 416, 416] 
+      
+      max_npoint: 150000 # 35m 大切块点数较多，给足空间
+      min_npoint: 1000   # 忽略稀疏的无效块
+      
   test:
     type: 'forinstance'
-    data_root: 'dataset/forinstance'
+    data_root: 'dataset/forinstance/preprocess_tiled'
     prefix: 'val'
-    suffix: '.las'
+    suffix: '.pth'
     training: False
     voxel_cfg:
       scale: 10
-      # [可视化诊断] 进一步缩小以降低内存使用
-      spatial_shape: [96, 96]  # 固定窗口大小，降低内存使用
-      max_npoint: 20000    # [可视化诊断] 进一步降低点数限制
-      min_npoint: 1000     # [修复] 降低最小点数，适配新的裁剪策略
+      # [关键修改 6] 测试集也要同步修改，否则无法推理
+      spatial_shape: [416, 416, 416] 
+      max_npoint: 150000
+      min_npoint: 1000
 
 dataloader:
   train:
-    batch_size: 1        # [修复] 降到最小，避免OOM
-    num_workers: 4        # [修复] 提高到4，减少Loss波动
+    batch_size: 1      # 必须是 1，配合 Group Norm 使用
+    num_workers: 4     # 4个进程加速数据加载
   test:
     batch_size: 1
-    num_workers: 1
+    num_workers: 2
 
 optimizer:
   type: 'Adam'
-  lr: 0.002
+  lr: 0.002 
 
 loss_weights:
   semantic_loss: 1.0
-  offset_loss: 0.1
+  # [关键修改 7] 提高 Offset 权重
+  # 因为改用了“树干引导”，我们希望模型更用力地学习“指向树心”
+  offset_loss: 1.5   
   cls_loss: 1.0
   mask_loss: 1.0
   iou_score_loss: 1.0
 
-fp16: False
+fp16: False         # 森林坐标数值大，必须关掉 FP16 防止溢出
 epochs: 108
-step_epoch: 20
+step_epoch: 40      # 延后衰减，让模型多学一会儿
 save_freq: 4
-log_interval: 10
+log_interval: 50    # 减少日志刷屏

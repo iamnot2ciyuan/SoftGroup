@@ -1,0 +1,150 @@
+2026-01-05 00:43:11,744 - INFO - Config:
+model:
+  channels: 32
+  num_blocks: 6        # [关键修复] 从 7 改为 6，减少一层下采样，避免BatchNorm错误
+  semantic_classes: 3   # 0=low_vegetation, 1=terrain, 2=tree
+  instance_classes: 1   # 全部树归为1类实例
+  sem2ins_classes: [2]  # 对语义类别2（tree）做实例分割
+  semantic_only: False
+  semantic_weight: [2.0, 2.0, 1.0]  # [修复语义分割] 提高low_vegetation和terrain的权重，减少地面被误分类为树木
+  ignore_label: -100
+  with_coords: True
+
+  grouping_cfg:
+    with_pyramid: False
+    pyramid_base_size: 20
+    with_octree: True
+    # [可视化诊断] 极低门槛，把所有能检测到的东西都画出来
+    score_thr: 0.05    # 只要有一点点像是树，就把它留下来！
+    # [可视化诊断] 测试时使用 20 (2.0米)，容忍 5米的 Offset 误差
+    radius: 20          # 20个体素 = 2.0米 (10cm体素 * 20 = 2.0米)
+    mean_active: 100   # [可视化诊断] 进一步降低以避免CUDA内存错误
+    class_numpoint_mean: [-1., -1., -1.]
+    # [可视化诊断] 允许小一点的树
+    npoint_thr: 10     # 降低阈值，允许更小的树被检测
+    ignore_classes: [0, 1]  # 只忽略low_vegetation和terrain，对tree(2)做聚类
+
+  instance_voxel_cfg:
+    scale: 10            # 10cm体素，更适合森林
+    spatial_shape: 512
+
+  train_cfg:
+    lvl_fusion: True
+    max_proposal_num: 1000
+    # [微调] 稍微提高门槛，追求质量
+    # 既然 Offset 精度已经提升到 1.7米，可以稍微提高 IoU 门槛
+    # 过滤掉那些纯粹是凑数的垃圾样本，让 Mask Loss 能学到更高质量的特征
+    pos_iou_thr: 0.1
+    match_low_quality: True
+    # [微调] 稍微提高最小正样本阈值，追求质量
+    min_pos_thr: 0.1
+
+  test_cfg:
+    x4_split: False
+    cls_score_thr: 0.01  # [可视化诊断] 极低门槛，几乎不过滤
+    mask_score_thr: 0.0001  # [关键修复] mask预测质量很低，需要极低阈值
+    min_npoint: 1        # [关键修复] mask预测质量很低，生成的mask点数很少，需要极低阈值
+    eval_tasks: ['semantic', 'instance']  # [可视化诊断] 务必包含 instance，否则不生成实例结果
+  fixed_modules: []
+
+data:
+  train:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'train'
+    suffix: '.las'
+    training: True
+    repeat: 4            # [修复] 降低Batch Size后，增加Repeat次数保证训练数据量
+    voxel_cfg:
+      scale: 10            # 10cm 体素，更适合森林
+      # [核心修复] 新格式: [Z, XY] -> Z轴 256 (25.6米), XY轴 160 (16米)
+      # 这是一个固定的取景框，不会再动态缩小了
+      spatial_shape: [256, 160]
+      # 允许框内有更多点，防止采样导致的稀疏
+      max_npoint: 100000   # [修复] 增大到100k，充分利用显存
+      # 只要框到了 1000 个点以上就算有效批次
+      min_npoint: 1000     # [核心修复] 从 500 提高到 1000，过滤掉太稀疏的样本
+  test:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'val'
+    suffix: '.las'
+    training: False
+    voxel_cfg:
+      scale: 10
+      # [可视化诊断] 进一步缩小以降低内存使用
+      spatial_shape: [96, 96]  # 固定窗口大小，降低内存使用
+      max_npoint: 20000    # [可视化诊断] 进一步降低点数限制
+      min_npoint: 1000     # [修复] 降低最小点数，适配新的裁剪策略
+
+dataloader:
+  train:
+    batch_size: 1        # [修复] 降到最小，避免OOM
+    num_workers: 4        # [修复] 提高到4，减少Loss波动
+  test:
+    batch_size: 1
+    num_workers: 1
+
+optimizer:
+  type: 'Adam'
+  lr: 0.002
+
+loss_weights:
+  semantic_loss: 1.0
+  offset_loss: 0.1
+  cls_loss: 1.0
+  mask_loss: 1.0
+  iou_score_loss: 1.0
+
+fp16: False
+epochs: 108
+step_epoch: 20
+save_freq: 4
+log_interval: 10
+
+2026-01-05 00:43:11,744 - INFO - Distributed: False
+2026-01-05 00:43:11,744 - INFO - Mix precision training: False
+2026-01-05 00:43:16,564 - INFO - Load train dataset: 40 scans
+2026-01-05 00:43:16,566 - INFO - Load test dataset: 11 scans
+2026-01-05 00:43:16,568 - INFO - Training
+2026-01-05 00:43:29,610 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:43:30,619 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:43:31,305 - WARNING - pt_offset_label 修正后仍然很大 (max=33.02)，可能仍有单位问题！
+2026-01-05 00:43:31,384 - WARNING - pt_offset_label 修正后仍然很大 (max=32.31)，可能仍有单位问题！
+2026-01-05 00:43:32,171 - INFO - [DEBUG] forward_grouping: 生成了 93790 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:32,222 - INFO - [DEBUG] instance_loss: proposals=16, gts=5, max_iou=0.2949, mean_iou=0.0199, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:43:32,222 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:43:34,365 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:43:35,134 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:43:35,678 - INFO - [DEBUG] forward_grouping: 生成了 96003 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:35,717 - INFO - [DEBUG] instance_loss: proposals=2, gts=3, max_iou=0.1106, mean_iou=0.0553, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:43:35,718 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:43:36,135 - INFO - [DEBUG] forward_grouping: 生成了 99379 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:36,179 - INFO - [DEBUG] instance_loss: proposals=1, gts=38, max_iou=0.0568, mean_iou=0.0568, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:43:36,629 - INFO - [DEBUG] forward_grouping: 生成了 98379 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:36,673 - INFO - [DEBUG] instance_loss: proposals=10, gts=17, max_iou=0.1247, mean_iou=0.0220, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:43:36,674 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 4 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:43:42,495 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:43:48,085 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:43:51,343 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:43:51,778 - INFO - [DEBUG] forward_grouping: 生成了 99050 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:51,828 - INFO - [DEBUG] instance_loss: proposals=1, gts=7, max_iou=0.0568, mean_iou=0.0568, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:43:52,228 - INFO - [DEBUG] forward_grouping: 生成了 88269 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:52,269 - INFO - [DEBUG] instance_loss: proposals=9, gts=15, max_iou=0.0972, mean_iou=0.0108, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:43:52,708 - INFO - [DEBUG] forward_grouping: 生成了 99414 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:52,752 - INFO - [DEBUG] instance_loss: proposals=3, gts=14, max_iou=0.1582, mean_iou=0.0606, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:43:52,753 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:43:53,185 - INFO - [DEBUG] forward_grouping: 生成了 99749 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:43:53,225 - INFO - [DEBUG] instance_loss: proposals=2, gts=26, max_iou=0.1283, mean_iou=0.0642, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:43:53,226 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:43:57,517 - WARNING - pt_offset_label 修正后仍然很大 (max=25.99)，可能仍有单位问题！
+2026-01-05 00:44:02,715 - WARNING - pt_offset_label 修正后仍然很大 (max=31.84)，可能仍有单位问题！
+2026-01-05 00:44:06,418 - WARNING - pt_offset_label 修正后仍然很大 (max=30.08)，可能仍有单位问题！
+2026-01-05 00:44:06,837 - INFO - [DEBUG] forward_grouping: 生成了 99513 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:44:06,883 - INFO - [DEBUG] instance_loss: proposals=1, gts=25, max_iou=0.0736, mean_iou=0.0736, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:44:07,291 - INFO - [DEBUG] forward_grouping: 生成了 99571 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:44:07,336 - INFO - [DEBUG] instance_loss: proposals=1, gts=9, max_iou=0.0892, mean_iou=0.0892, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:44:07,396 - INFO - Epoch [1/108][10/40]  lr: 0.002, eta: 6:05:05, mem: 1482, data_time: 0.00, iter_time: 0.45, semantic_loss: 1.0519, offset_loss: 6.0448, cls_loss: 0.5221, mask_loss: 0.0000, iou_score_loss: 0.0000, num_pos: 0.0000, num_neg: 1.0000, loss: 7.6188
+2026-01-05 00:44:07,761 - INFO - [DEBUG] forward_grouping: 生成了 99558 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:44:07,806 - INFO - [DEBUG] instance_loss: proposals=1, gts=6, max_iou=0.4330, mean_iou=0.4330, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:44:07,806 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)

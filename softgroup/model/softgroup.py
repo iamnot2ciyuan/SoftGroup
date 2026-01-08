@@ -117,6 +117,29 @@ class SoftGroup(nn.Module):
         if self.with_coords:
             feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
+
+        # =========================================================================
+        # [核心修复] 强制空间尺寸对齐 (Force Spatial Shape Alignment)
+        # =========================================================================
+        # 1. 获取当前 Batch 中实际的坐标最大值
+        current_max_coords = voxel_coords[:, 1:].max(0)[0].cpu().numpy() + 1
+        
+        # 2. 确保 spatial_shape 至少能包住所有点
+        if spatial_shape is None:
+            spatial_shape = current_max_coords
+        else:
+            if not isinstance(spatial_shape, (list, tuple, np.ndarray)):
+                spatial_shape = [spatial_shape] * 3
+            spatial_shape = np.array(spatial_shape)
+            # 确保不小于当前数据的最大范围
+            spatial_shape = np.maximum(spatial_shape, current_max_coords)
+            
+        # 3. 向上取整到 64 的倍数 (适配 5-6 层网络的下采样)
+        ALIGNMENT = 64
+        spatial_shape = ((spatial_shape + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT).astype(int)
+        spatial_shape = spatial_shape.tolist()
+        # =========================================================================
+
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
         semantic_scores, pt_offsets, output_feats = self.forward_backbone(input, v2p_map)
 
@@ -201,12 +224,10 @@ class SoftGroup(nn.Module):
         proposals_offset = proposals_offset.cuda()
 
         # 🚨 关键修复：将 instance_labels 从 class_id * 1000 + instance_id 格式转换为连续的实例ID
-        # get_mask_iou_on_cluster 期望连续的实例ID（0, 1, 2, ...），而不是 class_id * 1000 + instance_id
         instance_labels_continuous = instance_labels.clone()
         unique_inst_ids = torch.unique(instance_labels)
         unique_inst_ids = unique_inst_ids[unique_inst_ids != self.ignore_label]
         
-        # 将 class_id * 1000 + instance_id 映射回连续ID
         for idx, inst_id in enumerate(unique_inst_ids):
             instance_labels_continuous[instance_labels == inst_id] = idx
         
@@ -240,7 +261,6 @@ class SoftGroup(nn.Module):
         assigned_gt_inds[pos_inds] = argmax_iou[pos_inds]
 
         # allow low-quality proposals with best iou to be as positive sample
-        # in case pos_iou_thr is too high to achieve
         match_low_quality = getattr(self.train_cfg, 'match_low_quality', False)
         min_pos_thr = getattr(self.train_cfg, 'min_pos_thr', 0)
         if match_low_quality:
@@ -295,17 +315,6 @@ class SoftGroup(nn.Module):
         return losses
 
     def parse_losses(self, losses):
-        """Parse the raw outputs (losses) of the network.
-
-        Args:
-            losses (dict): Raw output of the network, which usually contain
-                losses and other necessary information.
-
-        Returns:
-            tuple[Tensor, dict]: (loss, log_vars), loss is the loss tensor \
-                which may be a weighted sum of all losses, log_vars contains \
-                all the variables to be sent to the logger.
-        """
         log_vars = OrderedDict()
         for loss_name, loss_value in losses.items():
             if isinstance(loss_value, torch.Tensor):
@@ -317,7 +326,6 @@ class SoftGroup(nn.Module):
 
         loss = sum(_value for _key, _value in log_vars.items() if 'loss' in _key)
 
-        # If the loss_vars has different length, GPUs will wait infinitely
         if dist.is_available() and dist.is_initialized():
             log_var_length = torch.tensor(len(log_vars), device=loss.device)
             dist.all_reduce(log_var_length)
@@ -328,7 +336,6 @@ class SoftGroup(nn.Module):
 
         log_vars['loss'] = loss
         for loss_name, loss_value in log_vars.items():
-            # reduce loss when distributed training
             if dist.is_available() and dist.is_initialized():
                 loss_value = loss_value.data.clone()
                 dist.all_reduce(loss_value.div_(dist.get_world_size()))
@@ -344,6 +351,24 @@ class SoftGroup(nn.Module):
         if self.with_coords:
             feats = torch.cat((feats, coords_float), 1)
         voxel_feats = voxelization(feats, p2v_map)
+
+        # =========================================================================
+        # [核心修复] 测试阶段也要强制对齐
+        # =========================================================================
+        current_max_coords = voxel_coords[:, 1:].max(0)[0].cpu().numpy() + 1
+        if spatial_shape is None:
+            spatial_shape = current_max_coords
+        else:
+            if not isinstance(spatial_shape, (list, tuple, np.ndarray)):
+                spatial_shape = [spatial_shape] * 3
+            spatial_shape = np.array(spatial_shape)
+            spatial_shape = np.maximum(spatial_shape, current_max_coords)
+        
+        ALIGNMENT = 64
+        spatial_shape = ((spatial_shape + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT).astype(int)
+        spatial_shape = spatial_shape.tolist()
+        # =========================================================================
+
         input = spconv.SparseConvTensor(voxel_feats, voxel_coords.int(), spatial_shape, batch_size)
 
         # lvl_fusion directly use output point as level 1 for pyramid map for fast inference
@@ -448,7 +473,7 @@ class SoftGroup(nn.Module):
             x_new[p] = x_split[i]
         return x_new
 
-    @force_fp32(apply_to=('semantic_scores, pt_offsets'))
+    @force_fp32(apply_to=('semantic_scores', 'pt_offsets'))
     def forward_grouping(self,
                          semantic_scores,
                          pt_offsets,
@@ -461,15 +486,11 @@ class SoftGroup(nn.Module):
         batch_size = batch_idxs.max() + 1
         semantic_scores = semantic_scores.softmax(dim=-1)
 
-        # [核心修复] radius 单位转换：根据文档，radius 是米单位，但 coords_float 是体素单位
-        # 需要将 radius 从米单位转换为体素单位
-        # 如果 instance_voxel_cfg.scale 存在，voxel_size = 1 / scale
-        # radius_voxel = radius_meter / voxel_size = radius_meter * scale
+        # [核心修复] radius 单位转换
         if self.instance_voxel_cfg is not None and hasattr(self.instance_voxel_cfg, 'scale'):
             voxel_size = 1.0 / self.instance_voxel_cfg.scale
-            radius = self.grouping_cfg.radius / voxel_size  # 米单位 -> 体素单位
+            radius = self.grouping_cfg.radius / voxel_size
         else:
-            # 如果没有 scale 信息，假设 radius 已经是体素单位（向后兼容）
             radius = self.grouping_cfg.radius
         
         mean_active = self.grouping_cfg.mean_active
@@ -493,11 +514,11 @@ class SoftGroup(nn.Module):
             if with_pyramid:
                 num_points = coords_.size(0)
                 level = self.get_level(num_points)
-                radius_level = radius * level  # 使用转换后的体素单位 radius
+                radius_level = radius * level
                 if level > 1 or not lvl_fusion:
                     coords_, pt_offsets_, batch_idxs_, l2p_map = self.pyramid_map(
                         coords_, pt_offsets_, batch_idxs_, level, base_size)
-                radius = radius_level  # 更新 radius 为 level 调整后的值
+                radius = radius_level
             batch_offsets_ = self.get_batch_offsets(batch_idxs_, batch_size)
             neighbor_inds, start_len = ball_query(
                 coords_ + pt_offsets_,
@@ -578,15 +599,10 @@ class SoftGroup(nn.Module):
         max_idx = inst_map_long.max().item() if inst_map_long.numel() > 0 else -1
         min_idx = inst_map_long.min().item() if inst_map_long.numel() > 0 else -1
         
-        # 检查索引越界
         if max_idx >= mask_size or min_idx < 0:
-            # 记录错误信息
             import logging
             logger = logging.getLogger()
             logger.error(f"CUDA Index Error: mask_scores size={mask_size}, inst_map range=[{min_idx}, {max_idx}]")
-            logger.error(f"Index out of bounds detected! Clamping indices...")
-            
-            # 修复：将越界索引限制在有效范围内
             inst_map_long = torch.clamp(inst_map_long, min=0, max=mask_size - 1)
         
         mask_scores = mask_scores[inst_map_long]
@@ -628,7 +644,12 @@ class SoftGroup(nn.Module):
         num_points = semantic_scores.size(0)
         cls_scores = cls_scores.softmax(1)
         semantic_pred = semantic_scores.max(1)[1]
+        
+        # [配置] 验证阶段最大 Proposal 数量
+        MAX_TEST_PROPOSALS = 1000 
+        
         cls_pred_list, score_pred_list, mask_pred_list = [], [], []
+        
         for i in range(self.instance_classes):
             if i in self.sem2ins_classes:
                 cls_pred = cls_scores.new_tensor([i + 1], dtype=torch.long)
@@ -636,76 +657,74 @@ class SoftGroup(nn.Module):
                 mask_pred = (semantic_pred == i)[None, :].int()
                 if lvl_fusion:
                     mask_pred = mask_pred[:, v2p_map.long()]
+                cls_pred_list.append(cls_pred.cpu())
+                score_pred_list.append(score_pred.cpu())
+                mask_pred_list.append(mask_pred.cpu())
             else:
-                cls_pred = cls_scores.new_full((num_instances, ), i + 1, dtype=torch.long)
                 cur_cls_scores = cls_scores[:, i]
                 cur_iou_scores = iou_scores[:, i]
-                cur_mask_scores = mask_scores[:, i]
-                # [关键修复] mask_scores是logits，需要sigmoid转换为概率
-                cur_mask_scores = cur_mask_scores.sigmoid()
+                cur_mask_scores = mask_scores[:, i].sigmoid() # 提前 Sigmoid
                 score_pred = cur_cls_scores * cur_iou_scores.clamp(0, 1)
-                # [调试] 打印mask_score统计
-                import logging
-                logger = logging.getLogger()
-                if cur_mask_scores.numel() > 0:
-                    logger.info(f'[DEBUG get_instances] mask_scores (after sigmoid): min={cur_mask_scores.min().item():.4f}, max={cur_mask_scores.max().item():.4f}, mean={cur_mask_scores.mean().item():.4f}, thr={self.test_cfg.mask_score_thr}')
-                    logger.info(f'[DEBUG get_instances] Before mask filter: {cur_mask_scores.numel()} proposals')
-                mask_pred = torch.zeros((num_instances, num_points), dtype=torch.int, device='cuda')
-                mask_inds = cur_mask_scores > self.test_cfg.mask_score_thr
-                logger.info(f'[DEBUG get_instances] After mask filter: {mask_inds.sum().item()} proposals')
-                cur_proposals_idx = proposals_idx[mask_inds].long()
-                mask_pred[cur_proposals_idx[:, 0], cur_proposals_idx[:, 1]] = 1
-
-                # filter low score instance
-                # [调试] 打印分数统计
-                import logging
-                logger = logging.getLogger()
-                if cur_cls_scores.numel() > 0:
-                    logger.info(f'[DEBUG get_instances] cls_scores: min={cur_cls_scores.min().item():.4f}, max={cur_cls_scores.max().item():.4f}, mean={cur_cls_scores.mean().item():.4f}, thr={self.test_cfg.cls_score_thr}')
-                    logger.info(f'[DEBUG get_instances] Before cls filter: {cur_cls_scores.numel()} proposals')
-                inds = cur_cls_scores > self.test_cfg.cls_score_thr
-                logger.info(f'[DEBUG get_instances] After cls filter: {inds.sum().item()} proposals')
-                cls_pred = cls_pred[inds]
-                score_pred = score_pred[inds]
-                mask_pred = mask_pred[inds]
-
-                # 关键修复：在lvl_fusion之前限制proposal数量，避免内存不足
-                # 如果proposal数量太多，只保留top-k个
-                max_proposals_before_fusion = 3000  # 进一步限制
-                if mask_pred.shape[0] > max_proposals_before_fusion:
-                    # 按cls_score排序，保留top-k
-                    _, top_inds = cur_cls_scores[inds].topk(max_proposals_before_fusion, dim=0)
-                    cls_pred = cls_pred[top_inds]
-                    score_pred = score_pred[top_inds]
-                    mask_pred = mask_pred[top_inds]
-
+                
+                # 1. 初步筛选 (Score Threshold)
+                keep_inds = score_pred > self.test_cfg.cls_score_thr
+                
+                # 2. Top-K 截断
+                if keep_inds.sum() > MAX_TEST_PROPOSALS:
+                    valid_scores = score_pred[keep_inds]
+                    thr = valid_scores.topk(MAX_TEST_PROPOSALS)[0][-1]
+                    keep_inds = keep_inds & (score_pred >= thr)
+                
+                # 获取最终保留的 instance indices (在当前类别 i 中的索引)
+                final_inds = torch.nonzero(keep_inds).squeeze(1) # Shape: (K, )
+                
+                if final_inds.numel() == 0:
+                    continue
+                    
+                # 3. 准备输出数据
+                cur_cls_pred = cls_scores.new_full((final_inds.numel(), ), i + 1, dtype=torch.long)
+                cur_score_pred = score_pred[final_inds]
+                
+                # 4. 高效生成 Mask (无循环法)
+                # 创建一个映射表: Old_Instance_ID -> New_Row_ID (0~K-1)
+                map_tensor = torch.full((num_instances + 1, ), -1, dtype=torch.long, device='cuda')
+                map_tensor[final_inds] = torch.arange(final_inds.numel(), device='cuda')
+                
+                # 筛选出 mask score 高的点 (全局筛选)
+                valid_point_mask = cur_mask_scores > self.test_cfg.mask_score_thr
+                
+                # 获取这些点的 (instance_id, point_id)
+                valid_proposals_idx = proposals_idx[valid_point_mask].long()
+                
+                # 检查这些点的 instance_id 是否在我们保留的 final_inds 里面
+                inst_ids = valid_proposals_idx[:, 0]
+                new_row_ids = map_tensor[inst_ids]
+                
+                # 只保留 new_row_ids != -1 的点
+                final_point_mask = new_row_ids != -1
+                
+                final_rows = new_row_ids[final_point_mask]
+                final_cols = valid_proposals_idx[final_point_mask, 1]
+                
+                # 5. 填充矩阵
+                mask_pred = torch.zeros((final_inds.numel(), num_points), dtype=torch.int, device='cuda')
+                mask_pred[final_rows, final_cols] = 1
+                
                 if lvl_fusion:
                     mask_pred = mask_pred[:, v2p_map.long()]
 
-                # filter too small instances
-                # 关键修复：分批计算npoint以避免内存不足
-                batch_size_npoint = 1000  # 每次处理1000个proposal
-                if mask_pred.shape[0] > batch_size_npoint:
-                    npoint_list = []
-                    for i in range(0, mask_pred.shape[0], batch_size_npoint):
-                        end_idx = min(i + batch_size_npoint, mask_pred.shape[0])
-                        npoint_batch = mask_pred[i:end_idx].sum(1)
-                        npoint_list.append(npoint_batch)
-                    npoint = torch.cat(npoint_list)
-                else:
-                    npoint = mask_pred.sum(1)
-                # [调试] 打印npoint统计
-                if npoint.numel() > 0:
-                    logger.info(f'[DEBUG get_instances] npoint: min={npoint.min().item()}, max={npoint.max().item()}, mean={npoint.float().mean().item():.1f}, thr={self.test_cfg.min_npoint}')
-                    logger.info(f'[DEBUG get_instances] Before npoint filter: {npoint.numel()} proposals')
-                inds = npoint >= self.test_cfg.min_npoint
-                logger.info(f'[DEBUG get_instances] After npoint filter: {inds.sum().item()} proposals')
-                cls_pred = cls_pred[inds]
-                score_pred = score_pred[inds]
-                mask_pred = mask_pred[inds]
-            cls_pred_list.append(cls_pred.cpu())
-            score_pred_list.append(score_pred.cpu())
-            mask_pred_list.append(mask_pred.cpu())
+                # 6. 过滤太小的实例 (Min Points)
+                npoint = mask_pred.sum(1)
+                keep_small = npoint >= self.test_cfg.min_npoint
+                
+                cls_pred_list.append(cur_cls_pred[keep_small].cpu())
+                score_pred_list.append(cur_score_pred[keep_small].cpu())
+                mask_pred_list.append(mask_pred[keep_small].cpu())
+
+        # [修复] 防止空列表导致的 torch.cat 报错
+        if len(cls_pred_list) == 0:
+            return []
+
         cls_pred = torch.cat(cls_pred_list).numpy()
         score_pred = torch.cat(score_pred_list).numpy()
         mask_pred = torch.cat(mask_pred_list).numpy()
@@ -716,7 +735,6 @@ class SoftGroup(nn.Module):
             pred['scan_id'] = scan_id
             pred['label_id'] = cls_pred[i]
             pred['conf'] = score_pred[i]
-            # rle encode mask to save memory
             pred['pred_mask'] = rle_encode(mask_pred[i])
             instances.append(pred)
         return instances
@@ -814,24 +832,26 @@ class SoftGroup(nn.Module):
             coords_min -= torch.clamp(spatial_shape - range + 0.001, max=0) * torch.rand(3).cuda()
         coords_min = coords_min[batch_idx]
         coords -= coords_min
+        
         # 修复：spatial_shape可能是标量或列表，需要统一处理
-        # 将坐标限制在[0, spatial_shape)范围内，防止越界
         if isinstance(spatial_shape, (list, tuple)):
             spatial_shape_tensor = torch.tensor(spatial_shape, device=coords.device, dtype=coords.dtype)
             coords = torch.clamp(coords, min=0, max=spatial_shape_tensor - 1e-6)
         else:
             coords = torch.clamp(coords, min=0, max=spatial_shape - 1e-6)
+        
         # 验证坐标是否在有效范围内
         if isinstance(spatial_shape, (list, tuple)):
             spatial_shape_tensor = torch.tensor(spatial_shape, device=coords.device, dtype=coords.dtype)
             coords_valid = ((coords >= 0) * (coords < spatial_shape_tensor)).all(dim=1)
         else:
             coords_valid = ((coords >= 0) * (coords < spatial_shape)).all(dim=1)
+            
         if coords.shape[0] != coords_valid.sum():
-            # 如果仍有越界，记录警告但继续执行（通过clamp已经修复）
             import logging
             logger = logging.getLogger()
-            logger.warning(f"坐标越界已修复: {coords.shape[0]} -> {coords_valid.sum()}, spatial_shape={spatial_shape}, coords_max={coords.max(0)[0]}, coords_min={coords.min(0)[0]}")
+            logger.warning(f"坐标越界已修复: {coords.shape[0]} -> {coords_valid.sum()}, spatial_shape={spatial_shape}")
+            
         coords = coords.long()
         coords = torch.cat([clusters_idx[:, 0].view(-1, 1).long(), coords.cpu()], 1)
 

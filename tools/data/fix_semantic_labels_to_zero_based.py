@@ -5,11 +5,8 @@ import torch
 import numpy as np
 from glob import glob
 
-DATA_DIR = "dataset/forinstance/preprocess"   # 预处理数据目录
-OUT_DIR = "dataset/forinstance/preprocess_fixed"  # 修复后输出目录
+DATA_DIR = "dataset/forinstance/preprocess_tiled"   # 预处理数据目录（直接覆盖原文件）
 IGNORE_LABEL = -100  # 与 config 中 ignore_label 保持一致
-
-os.makedirs(OUT_DIR, exist_ok=True)
 
 # 查找所有 .pth 文件
 pths = glob(os.path.join(DATA_DIR, "**/*.pth"), recursive=True) + glob(os.path.join(DATA_DIR, "*.pth"))
@@ -32,25 +29,27 @@ else:
                 if neg_mask.any():
                     sem[neg_mask] = IGNORE_LABEL
                 
-                # 将大于等于1的类减1（1->0, 2->1, 3->2）
-                # 但跳过 IGNORE_LABEL
+                # 检查是否需要转换：如果标签最大值 > 2，说明是1-based，需要减1
+                # 如果最大值 <= 2 且最小值 >= 0，说明已经是0-based，不需要转换
                 valid_mask = sem != IGNORE_LABEL
                 if valid_mask.sum() > 0:
-                    sem[valid_mask] = sem[valid_mask] - 1
+                    valid_sem = sem[valid_mask]
+                    max_sem = valid_sem.max()
+                    min_sem = valid_sem.min()
+                    # 如果最大值 > 2 或最小值 > 0，说明可能是1-based，需要减1
+                    if max_sem > 2 or (min_sem > 0 and max_sem > 2):
+                        sem[valid_mask] = sem[valid_mask] - 1
+                    # 如果已经是0-based（最大值 <= 2 且最小值 >= 0），不需要转换
+                    # 但需要确保所有负值（除了-100）都被设置为-100
                 
                 # 额外检查是否存在超范围值
                 valid_sem = sem[sem != IGNORE_LABEL]
                 if len(valid_sem) > 0 and valid_sem.max() >= 3:
                     print(f"警告：检测到异常大语义标签值 {valid_sem.max()}，文件: {p}")
                 
-                # 保存到新目录（保留原目录结构）
-                rel = os.path.relpath(p, DATA_DIR)
-                outp = os.path.join(OUT_DIR, rel)
-                os.makedirs(os.path.dirname(outp), exist_ok=True)
-                
-                # 保存修复后的数据
+                # 直接覆盖原文件
                 fixed_data = (xyz, rgb, sem.astype(np.int32), inst) if inst is not None else (xyz, rgb, sem.astype(np.int32))
-                torch.save(fixed_data, outp)
+                torch.save(fixed_data, p)
                 fixed_count += 1
                 if fixed_count % 5 == 0:
                     print(f"已处理 {fixed_count}/{len(pths)} 个文件...")
@@ -67,18 +66,22 @@ else:
                 if neg_mask.any():
                     sem[neg_mask] = IGNORE_LABEL
                 
-                # 将大于等于1的类减1（1->0, 2->1, 3->2）
+                # 检查是否需要转换：如果标签最大值 > 2，说明是1-based，需要减1
+                # 如果最大值 <= 2 且最小值 >= 0，说明已经是0-based，不需要转换
                 valid_mask = sem != IGNORE_LABEL
                 if valid_mask.sum() > 0:
-                    sem[valid_mask] = sem[valid_mask] - 1
+                    valid_sem = sem[valid_mask]
+                    max_sem = valid_sem.max()
+                    min_sem = valid_sem.min()
+                    # 如果最大值 > 2 或最小值 > 0，说明可能是1-based，需要减1
+                    if max_sem > 2 or (min_sem > 0 and max_sem > 2):
+                        sem[valid_mask] = sem[valid_mask] - 1
+                    # 如果已经是0-based（最大值 <= 2 且最小值 >= 0），不需要转换
+                    # 但需要确保所有负值（除了-100）都被设置为-100
                 
-                # 保存
-                rel = os.path.relpath(p, DATA_DIR)
-                outp = os.path.join(OUT_DIR, rel)
-                os.makedirs(os.path.dirname(outp), exist_ok=True)
-                
+                # 直接覆盖原文件
                 data["semantic_labels"] = sem.astype(np.int32)
-                torch.save(data, outp)
+                torch.save(data, p)
                 fixed_count += 1
             else:
                 print(f"跳过（未知数据格式）: {p}")
@@ -89,9 +92,5 @@ else:
             traceback.print_exc()
     
     print(f"\n全部处理完成！共修复 {fixed_count}/{len(pths)} 个文件")
-    print(f"输出目录：{OUT_DIR}")
-    print("\n下一步：")
-    print("1. 备份原数据（可选）: mv dataset/forinstance/preprocess dataset/forinstance/preprocess_bak")
-    print("2. 使用修复后的数据: mv dataset/forinstance/preprocess_fixed dataset/forinstance/preprocess")
-    print("   或者修改配置文件的 data_root 指向修复后的目录")
+    print(f"文件已直接覆盖到：{DATA_DIR}")
 

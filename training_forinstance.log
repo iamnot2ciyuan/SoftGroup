@@ -1,0 +1,156 @@
+2026-01-05 00:25:54,856 - INFO - Config:
+model:
+  channels: 32
+  num_blocks: 6        # [关键修复] 从 7 改为 6，减少一层下采样，避免BatchNorm错误
+  semantic_classes: 3   # 0=low_vegetation, 1=terrain, 2=tree
+  instance_classes: 1   # 全部树归为1类实例
+  sem2ins_classes: [2]  # 对语义类别2（tree）做实例分割
+  semantic_only: False
+  semantic_weight: [2.0, 2.0, 1.0]  # [修复语义分割] 提高low_vegetation和terrain的权重，减少地面被误分类为树木
+  ignore_label: -100
+  with_coords: True
+
+  grouping_cfg:
+    with_pyramid: False
+    pyramid_base_size: 20
+    with_octree: True
+    # [可视化诊断] 极低门槛，把所有能检测到的东西都画出来
+    score_thr: 0.05    # 只要有一点点像是树，就把它留下来！
+    # [可视化诊断] 测试时使用 20 (2.0米)，容忍 5米的 Offset 误差
+    radius: 20          # 20个体素 = 2.0米 (10cm体素 * 20 = 2.0米)
+    mean_active: 100   # [可视化诊断] 进一步降低以避免CUDA内存错误
+    class_numpoint_mean: [-1., -1., -1.]
+    # [可视化诊断] 允许小一点的树
+    npoint_thr: 10     # 降低阈值，允许更小的树被检测
+    ignore_classes: [0, 1]  # 只忽略low_vegetation和terrain，对tree(2)做聚类
+
+  instance_voxel_cfg:
+    scale: 10            # 10cm体素，更适合森林
+    spatial_shape: 512
+
+  train_cfg:
+    lvl_fusion: True
+    max_proposal_num: 1000
+    # [微调] 稍微提高门槛，追求质量
+    # 既然 Offset 精度已经提升到 1.7米，可以稍微提高 IoU 门槛
+    # 过滤掉那些纯粹是凑数的垃圾样本，让 Mask Loss 能学到更高质量的特征
+    pos_iou_thr: 0.1
+    match_low_quality: True
+    # [微调] 稍微提高最小正样本阈值，追求质量
+    min_pos_thr: 0.1
+
+  test_cfg:
+    x4_split: False
+    cls_score_thr: 0.01  # [可视化诊断] 极低门槛，几乎不过滤
+    mask_score_thr: 0.0001  # [关键修复] mask预测质量很低，需要极低阈值
+    min_npoint: 1        # [关键修复] mask预测质量很低，生成的mask点数很少，需要极低阈值
+    eval_tasks: ['semantic', 'instance']  # [可视化诊断] 务必包含 instance，否则不生成实例结果
+  fixed_modules: []
+
+data:
+  train:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'train'
+    suffix: '.las'
+    training: True
+    repeat: 4            # [修复] 降低Batch Size后，增加Repeat次数保证训练数据量
+    voxel_cfg:
+      scale: 10            # 10cm 体素，更适合森林
+      # [核心修复] 新格式: [Z, XY] -> Z轴 256 (25.6米), XY轴 160 (16米)
+      # 这是一个固定的取景框，不会再动态缩小了
+      spatial_shape: [256, 160]
+      # 允许框内有更多点，防止采样导致的稀疏
+      max_npoint: 100000   # [修复] 增大到100k，充分利用显存
+      # 只要框到了 1000 个点以上就算有效批次
+      min_npoint: 1000     # [核心修复] 从 500 提高到 1000，过滤掉太稀疏的样本
+  test:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'val'
+    suffix: '.las'
+    training: False
+    voxel_cfg:
+      scale: 10
+      # [可视化诊断] 进一步缩小以降低内存使用
+      spatial_shape: [96, 96]  # 固定窗口大小，降低内存使用
+      max_npoint: 20000    # [可视化诊断] 进一步降低点数限制
+      min_npoint: 1000     # [修复] 降低最小点数，适配新的裁剪策略
+
+dataloader:
+  train:
+    batch_size: 1        # [修复] 降到最小，避免OOM
+    num_workers: 4        # [修复] 提高到4，减少Loss波动
+  test:
+    batch_size: 1
+    num_workers: 1
+
+optimizer:
+  type: 'Adam'
+  lr: 0.002
+
+loss_weights:
+  semantic_loss: 1.0
+  offset_loss: 0.1
+  cls_loss: 1.0
+  mask_loss: 1.0
+  iou_score_loss: 1.0
+
+fp16: False
+epochs: 108
+step_epoch: 20
+save_freq: 4
+log_interval: 10
+
+2026-01-05 00:25:54,856 - INFO - Distributed: False
+2026-01-05 00:25:54,856 - INFO - Mix precision training: False
+2026-01-05 00:25:59,404 - INFO - Load train dataset: 40 scans
+2026-01-05 00:25:59,406 - INFO - Load test dataset: 11 scans
+2026-01-05 00:25:59,408 - INFO - Training
+2026-01-05 00:26:05,596 - WARNING - pt_offset_label 修正后仍然很大 (max=28.64)，可能仍有单位问题！
+2026-01-05 00:26:12,116 - WARNING - pt_offset_label 修正后仍然很大 (max=26.25)，可能仍有单位问题！
+2026-01-05 00:26:13,211 - WARNING - pt_offset_label 修正后仍然很大 (max=29.84)，可能仍有单位问题！
+2026-01-05 00:26:13,942 - WARNING - pt_offset_label 修正后仍然很大 (max=31.08)，可能仍有单位问题！
+Traceback (most recent call last):
+  File "/root/autodl-tmp/SoftGroup/tools/train.py", line 214, in <module>
+    main()
+  File "/root/autodl-tmp/SoftGroup/tools/train.py", line 207, in main
+    train(epoch, model, optimizer, scaler, train_loader, cfg, logger, writer)
+  File "/root/autodl-tmp/SoftGroup/tools/train.py", line 44, in train
+    for i, batch in enumerate(train_loader, start=1):
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 530, in __next__
+    data = self._next_data()
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 1224, in _next_data
+    return self._process_data(data)
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 1250, in _process_data
+    data.reraise()
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/_utils.py", line 457, in reraise
+    raise exception
+ImportError: Caught ImportError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 42, in _get_ops
+    from . import SOFTGROUP_OP as _ops
+ImportError: cannot import name 'SOFTGROUP_OP' from 'softgroup.ops' (/root/autodl-tmp/SoftGroup/softgroup/ops/__init__.py)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 46, in _get_ops
+    from . import ops as _ops
+ImportError: cannot import name 'ops' from 'softgroup.ops' (/root/autodl-tmp/SoftGroup/softgroup/ops/__init__.py)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/utils/data/_utils/worker.py", line 287, in _worker_loop
+    data = fetcher.fetch(index)
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/utils/data/_utils/fetch.py", line 52, in fetch
+    return self.collate_fn(data)
+  File "/root/autodl-tmp/SoftGroup/softgroup/data/custom.py", line 317, in collate_fn
+    voxel_coords, v2p_map, p2v_map = voxelization_idx(coords, batch_id)
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 235, in forward
+    _get_ops().voxelize_idx(coords, output_coords, input_map, output_map, batchsize, mode)
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 49, in _get_ops
+    raise ImportError(f"无法加载softgroup.ops模块，找不到.so文件在: {ops_dir}")
+ImportError: 无法加载softgroup.ops模块，找不到.so文件在: /root/autodl-tmp/SoftGroup/softgroup/ops
+

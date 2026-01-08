@@ -1,0 +1,307 @@
+2026-01-05 00:54:30,345 - INFO - Config:
+model:
+  channels: 32
+  num_blocks: 6        # [关键修复] 从 7 改为 6，减少一层下采样，避免BatchNorm错误
+  semantic_classes: 3   # 0=low_vegetation, 1=terrain, 2=tree
+  instance_classes: 1   # 全部树归为1类实例
+  sem2ins_classes: [2]  # 对语义类别2（tree）做实例分割
+  semantic_only: False
+  semantic_weight: [2.0, 2.0, 1.0]  # [修复语义分割] 提高low_vegetation和terrain的权重，减少地面被误分类为树木
+  ignore_label: -100
+  with_coords: True
+
+  grouping_cfg:
+    with_pyramid: False
+    pyramid_base_size: 20
+    with_octree: True
+    # [可视化诊断] 极低门槛，把所有能检测到的东西都画出来
+    score_thr: 0.05    # 只要有一点点像是树，就把它留下来！
+    # [可视化诊断] 测试时使用 20 (2.0米)，容忍 5米的 Offset 误差
+    radius: 20          # 20个体素 = 2.0米 (10cm体素 * 20 = 2.0米)
+    mean_active: 100   # [可视化诊断] 进一步降低以避免CUDA内存错误
+    class_numpoint_mean: [-1., -1., -1.]
+    # [可视化诊断] 允许小一点的树
+    npoint_thr: 10     # 降低阈值，允许更小的树被检测
+    ignore_classes: [0, 1]  # 只忽略low_vegetation和terrain，对tree(2)做聚类
+
+  instance_voxel_cfg:
+    scale: 10            # 10cm体素，更适合森林
+    spatial_shape: 512
+
+  train_cfg:
+    lvl_fusion: True
+    max_proposal_num: 1000
+    # [微调] 稍微提高门槛，追求质量
+    # 既然 Offset 精度已经提升到 1.7米，可以稍微提高 IoU 门槛
+    # 过滤掉那些纯粹是凑数的垃圾样本，让 Mask Loss 能学到更高质量的特征
+    pos_iou_thr: 0.1
+    match_low_quality: True
+    # [微调] 稍微提高最小正样本阈值，追求质量
+    min_pos_thr: 0.1
+
+  test_cfg:
+    x4_split: False
+    cls_score_thr: 0.01  # [可视化诊断] 极低门槛，几乎不过滤
+    mask_score_thr: 0.0001  # [关键修复] mask预测质量很低，需要极低阈值
+    min_npoint: 1        # [关键修复] mask预测质量很低，生成的mask点数很少，需要极低阈值
+    eval_tasks: ['semantic', 'instance']  # [可视化诊断] 务必包含 instance，否则不生成实例结果
+  fixed_modules: []
+
+data:
+  train:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'train'
+    suffix: '.las'
+    training: True
+    repeat: 4            # [修复] 降低Batch Size后，增加Repeat次数保证训练数据量
+    voxel_cfg:
+      scale: 10            # 10cm 体素，更适合森林
+      # [核心修复] 新格式: [Z, XY] -> Z轴 256 (25.6米), XY轴 160 (16米)
+      # 这是一个固定的取景框，不会再动态缩小了
+      spatial_shape: [256, 160]
+      # 允许框内有更多点，防止采样导致的稀疏
+      max_npoint: 100000   # [修复] 增大到100k，充分利用显存
+      # 只要框到了 1000 个点以上就算有效批次
+      min_npoint: 1000     # [核心修复] 从 500 提高到 1000，过滤掉太稀疏的样本
+  test:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance'
+    prefix: 'val'
+    suffix: '.las'
+    training: False
+    voxel_cfg:
+      scale: 10
+      # [可视化诊断] 进一步缩小以降低内存使用
+      spatial_shape: [96, 96]  # 固定窗口大小，降低内存使用
+      max_npoint: 20000    # [可视化诊断] 进一步降低点数限制
+      min_npoint: 1000     # [修复] 降低最小点数，适配新的裁剪策略
+
+dataloader:
+  train:
+    batch_size: 1        # [修复] 降到最小，避免OOM
+    num_workers: 4        # [修复] 提高到4，减少Loss波动
+  test:
+    batch_size: 1
+    num_workers: 1
+
+optimizer:
+  type: 'Adam'
+  lr: 0.002
+
+loss_weights:
+  semantic_loss: 1.0
+  offset_loss: 0.1
+  cls_loss: 1.0
+  mask_loss: 1.0
+  iou_score_loss: 1.0
+
+fp16: False
+epochs: 108
+step_epoch: 20
+save_freq: 4
+log_interval: 10
+
+2026-01-05 00:54:30,345 - INFO - Distributed: False
+2026-01-05 00:54:30,345 - INFO - Mix precision training: False
+2026-01-05 00:54:35,107 - INFO - Load train dataset: 40 scans
+2026-01-05 00:54:35,109 - INFO - Load test dataset: 11 scans
+2026-01-05 00:54:35,111 - INFO - Training
+2026-01-05 00:54:38,902 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:54:39,653 - INFO - [DEBUG] forward_grouping: 生成了 98198 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:54:39,703 - INFO - [DEBUG] instance_loss: proposals=2, gts=19, max_iou=0.2345, mean_iou=0.1180, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:54:39,704 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 4 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:54:41,492 - WARNING - pt_offset_label 修正后仍然很大 (max=28.37)，可能仍有单位问题！
+2026-01-05 00:54:43,566 - INFO - [DEBUG] forward_grouping: 生成了 99438 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:54:43,609 - INFO - [DEBUG] instance_loss: proposals=1, gts=10, max_iou=0.2017, mean_iou=0.2017, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:54:43,610 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 4 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:54:55,574 - WARNING - pt_offset_label 修正后仍然很大 (max=28.64)，可能仍有单位问题！
+2026-01-05 00:54:55,625 - WARNING - pt_offset_label 修正后仍然很大 (max=19.66)，可能仍有单位问题！
+2026-01-05 00:54:55,992 - INFO - [DEBUG] forward_grouping: 生成了 100000 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:54:56,037 - INFO - [DEBUG] instance_loss: proposals=1, gts=17, max_iou=0.2091, mean_iou=0.2091, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:54:56,037 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 4 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:54:56,482 - INFO - [DEBUG] forward_grouping: 生成了 98298 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:54:56,547 - INFO - [DEBUG] instance_loss: proposals=2, gts=9, max_iou=0.4478, mean_iou=0.2242, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:54:56,548 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:54:58,552 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:54:58,941 - INFO - [DEBUG] forward_grouping: 生成了 99982 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:54:58,988 - INFO - [DEBUG] instance_loss: proposals=3, gts=17, max_iou=0.3396, mean_iou=0.1132, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:54:58,989 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:01,459 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:55:01,888 - INFO - [DEBUG] forward_grouping: 生成了 89316 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:01,926 - INFO - [DEBUG] instance_loss: proposals=16, gts=5, max_iou=0.1115, mean_iou=0.0070, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:01,926 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:03,735 - WARNING - pt_offset_label 修正后仍然很大 (max=26.50)，可能仍有单位问题！
+2026-01-05 00:55:08,511 - WARNING - pt_offset_label 修正后仍然很大 (max=24.85)，可能仍有单位问题！
+2026-01-05 00:55:08,970 - INFO - [DEBUG] forward_grouping: 生成了 80293 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:09,004 - INFO - [DEBUG] instance_loss: proposals=97, gts=4, max_iou=0.2401, mean_iou=0.0027, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:09,005 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:15,688 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:55:16,110 - INFO - [DEBUG] forward_grouping: 生成了 98945 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:16,150 - INFO - [DEBUG] instance_loss: proposals=3, gts=4, max_iou=0.1875, mean_iou=0.0625, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:16,151 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:16,585 - INFO - [DEBUG] forward_grouping: 生成了 96669 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:16,624 - INFO - [DEBUG] instance_loss: proposals=10, gts=8, max_iou=0.2457, mean_iou=0.0551, pos_iou_thr=0.1, pos_count=2
+2026-01-05 00:55:16,624 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:17,482 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:55:21,404 - WARNING - pt_offset_label 修正后仍然很大 (max=22.42)，可能仍有单位问题！
+2026-01-05 00:55:21,833 - INFO - [DEBUG] forward_grouping: 生成了 98127 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:21,878 - INFO - [DEBUG] instance_loss: proposals=2, gts=6, max_iou=0.6382, mean_iou=0.3196, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:21,879 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:21,944 - INFO - Epoch [1/108][10/40]  lr: 0.002, eta: 5:36:24, mem: 1703, data_time: 4.77, iter_time: 5.26, semantic_loss: 0.8333, offset_loss: 7.0769, cls_loss: 0.6407, mask_loss: 0.5968, iou_score_loss: 0.0001, num_pos: 1.0000, num_neg: 1.0000, loss: 9.1478
+2026-01-05 00:55:22,343 - WARNING - pt_offset_label 修正后仍然很大 (max=34.62)，可能仍有单位问题！
+2026-01-05 00:55:22,732 - INFO - [DEBUG] forward_grouping: 生成了 99795 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:22,773 - INFO - [DEBUG] instance_loss: proposals=1, gts=17, max_iou=0.1485, mean_iou=0.1485, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:22,773 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:35,625 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:55:36,053 - INFO - [DEBUG] forward_grouping: 生成了 99878 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:36,094 - INFO - [DEBUG] instance_loss: proposals=1, gts=14, max_iou=0.4733, mean_iou=0.4733, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:36,094 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:36,145 - WARNING - pt_offset_label 修正后仍然很大 (max=33.87)，可能仍有单位问题！
+2026-01-05 00:55:36,435 - WARNING - pt_offset_label 修正后仍然很大 (max=34.20)，可能仍有单位问题！
+2026-01-05 00:55:36,555 - INFO - [DEBUG] forward_grouping: 生成了 96769 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:36,599 - INFO - [DEBUG] instance_loss: proposals=1, gts=3, max_iou=0.0956, mean_iou=0.0956, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:55:36,986 - INFO - [DEBUG] forward_grouping: 生成了 99892 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:37,028 - INFO - [DEBUG] instance_loss: proposals=2, gts=24, max_iou=0.0909, mean_iou=0.0455, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:55:37,212 - WARNING - pt_offset_label 修正后仍然很大 (max=32.48)，可能仍有单位问题！
+2026-01-05 00:55:37,455 - INFO - [DEBUG] forward_grouping: 生成了 96772 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:37,497 - INFO - [DEBUG] instance_loss: proposals=1, gts=21, max_iou=0.0960, mean_iou=0.0960, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:55:38,580 - WARNING - pt_offset_label 修正后仍然很大 (max=26.65)，可能仍有单位问题！
+2026-01-05 00:55:39,017 - INFO - [DEBUG] forward_grouping: 生成了 93775 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:39,057 - INFO - [DEBUG] instance_loss: proposals=10, gts=20, max_iou=0.2268, mean_iou=0.0530, pos_iou_thr=0.1, pos_count=2
+2026-01-05 00:55:39,057 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:39,467 - INFO - [DEBUG] forward_grouping: 生成了 98813 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:39,510 - INFO - [DEBUG] instance_loss: proposals=1, gts=18, max_iou=0.1214, mean_iou=0.1214, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:39,510 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:41,567 - WARNING - pt_offset_label 修正后仍然很大 (max=30.93)，可能仍有单位问题！
+2026-01-05 00:55:48,272 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:55:50,169 - WARNING - pt_offset_label 修正后仍然很大 (max=25.32)，可能仍有单位问题！
+2026-01-05 00:55:50,615 - INFO - [DEBUG] forward_grouping: 生成了 98528 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:50,656 - INFO - [DEBUG] instance_loss: proposals=4, gts=14, max_iou=0.1082, mean_iou=0.0360, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:50,657 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:51,050 - INFO - [DEBUG] forward_grouping: 生成了 99752 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:51,091 - INFO - [DEBUG] instance_loss: proposals=1, gts=41, max_iou=0.0644, mean_iou=0.0644, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:55:51,209 - WARNING - pt_offset_label 修正后仍然很大 (max=33.07)，可能仍有单位问题！
+2026-01-05 00:55:51,535 - INFO - [DEBUG] forward_grouping: 生成了 91857 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:51,572 - INFO - [DEBUG] instance_loss: proposals=2, gts=14, max_iou=0.1419, mean_iou=0.0710, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:51,572 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:51,632 - INFO - Epoch [1/108][20/40]  lr: 0.002, eta: 4:34:11, mem: 1703, data_time: 0.00, iter_time: 0.47, semantic_loss: 0.9677, offset_loss: 3.3799, cls_loss: 0.5514, mask_loss: 0.4271, iou_score_loss: 0.0000, num_pos: 1.0000, num_neg: 1.0000, loss: 5.3261
+2026-01-05 00:55:51,978 - INFO - [DEBUG] forward_grouping: 生成了 99423 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:55:52,053 - INFO - [DEBUG] instance_loss: proposals=1, gts=16, max_iou=0.1082, mean_iou=0.1082, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:55:52,053 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:55:53,645 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:55:58,898 - WARNING - pt_offset_label 修正后仍然很大 (max=28.20)，可能仍有单位问题！
+2026-01-05 00:56:00,341 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:56:03,173 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:56:03,438 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:56:03,636 - INFO - [DEBUG] forward_grouping: 生成了 88478 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:03,674 - INFO - [DEBUG] instance_loss: proposals=31, gts=10, max_iou=0.1688, mean_iou=0.0115, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:03,675 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:04,044 - INFO - [DEBUG] forward_grouping: 生成了 99972 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:04,118 - INFO - [DEBUG] instance_loss: proposals=1, gts=34, max_iou=0.0981, mean_iou=0.0981, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:56:04,566 - INFO - [DEBUG] forward_grouping: 生成了 94517 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:04,606 - INFO - [DEBUG] instance_loss: proposals=17, gts=15, max_iou=0.0543, mean_iou=0.0032, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:56:05,059 - INFO - [DEBUG] forward_grouping: 生成了 97056 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:05,102 - INFO - [DEBUG] instance_loss: proposals=9, gts=17, max_iou=0.1227, mean_iou=0.0181, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:05,103 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:09,604 - WARNING - pt_offset_label 修正后仍然很大 (max=34.07)，可能仍有单位问题！
+2026-01-05 00:56:13,259 - WARNING - pt_offset_label 修正后仍然很大 (max=34.02)，可能仍有单位问题！
+2026-01-05 00:56:18,194 - WARNING - pt_offset_label 修正后仍然很大 (max=31.25)，可能仍有单位问题！
+2026-01-05 00:56:18,362 - WARNING - pt_offset_label 修正后仍然很大 (max=26.80)，可能仍有单位问题！
+2026-01-05 00:56:18,608 - INFO - [DEBUG] forward_grouping: 生成了 99232 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:18,654 - INFO - [DEBUG] instance_loss: proposals=1, gts=17, max_iou=0.1688, mean_iou=0.1688, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:18,654 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:19,112 - INFO - [DEBUG] forward_grouping: 生成了 99615 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:19,153 - INFO - [DEBUG] instance_loss: proposals=2, gts=17, max_iou=0.1031, mean_iou=0.0515, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:19,154 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 1 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:19,582 - INFO - [DEBUG] forward_grouping: 生成了 99827 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:19,624 - INFO - [DEBUG] instance_loss: proposals=2, gts=15, max_iou=0.1973, mean_iou=0.0987, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:19,625 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:20,063 - INFO - [DEBUG] forward_grouping: 生成了 96247 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:20,103 - INFO - [DEBUG] instance_loss: proposals=6, gts=20, max_iou=0.1944, mean_iou=0.0376, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:20,103 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:22,433 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:56:23,694 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:56:23,718 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:56:24,096 - INFO - [DEBUG] forward_grouping: 生成了 99927 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:24,138 - INFO - [DEBUG] instance_loss: proposals=2, gts=15, max_iou=0.9907, mean_iou=0.5854, pos_iou_thr=0.1, pos_count=2
+2026-01-05 00:56:24,139 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 5 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:24,218 - INFO - Epoch [1/108][30/40]  lr: 0.002, eta: 4:20:02, mem: 1703, data_time: 3.58, iter_time: 4.05, semantic_loss: 0.4659, offset_loss: 5.6298, cls_loss: 0.7889, mask_loss: 0.2598, iou_score_loss: 0.0001, num_pos: 2.0000, num_neg: 0.0000, loss: 7.1445
+2026-01-05 00:56:26,698 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:56:27,137 - INFO - [DEBUG] forward_grouping: 生成了 97667 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:27,178 - INFO - [DEBUG] instance_loss: proposals=7, gts=7, max_iou=0.2470, mean_iou=0.0369, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:27,179 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:27,569 - INFO - [DEBUG] forward_grouping: 生成了 99745 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:27,610 - INFO - [DEBUG] instance_loss: proposals=2, gts=13, max_iou=0.1370, mean_iou=0.0691, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:27,610 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 5 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:28,047 - INFO - [DEBUG] forward_grouping: 生成了 94694 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:28,086 - INFO - [DEBUG] instance_loss: proposals=10, gts=11, max_iou=0.2033, mean_iou=0.0512, pos_iou_thr=0.1, pos_count=3
+2026-01-05 00:56:28,087 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 3 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:28,926 - WARNING - pt_offset_label 修正后仍然很大 (max=32.50)，可能仍有单位问题！
+2026-01-05 00:56:31,880 - WARNING - pt_offset_label 修正后仍然很大 (max=25.96)，可能仍有单位问题！
+2026-01-05 00:56:36,664 - WARNING - pt_offset_label 修正后仍然很大 (max=26.03)，可能仍有单位问题！
+2026-01-05 00:56:37,074 - INFO - [DEBUG] forward_grouping: 生成了 98811 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:37,116 - INFO - [DEBUG] instance_loss: proposals=5, gts=20, max_iou=0.1262, mean_iou=0.0358, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:37,116 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:37,559 - INFO - [DEBUG] forward_grouping: 生成了 98907 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:37,602 - INFO - [DEBUG] instance_loss: proposals=1, gts=9, max_iou=0.2108, mean_iou=0.2108, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:37,603 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:38,058 - INFO - [DEBUG] forward_grouping: 生成了 90120 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:38,100 - INFO - [DEBUG] instance_loss: proposals=10, gts=12, max_iou=0.2139, mean_iou=0.0216, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:38,100 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 4 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:38,522 - INFO - [DEBUG] forward_grouping: 生成了 99291 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:38,564 - INFO - [DEBUG] instance_loss: proposals=2, gts=10, max_iou=0.2914, mean_iou=0.1687, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:38,565 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:42,206 - WARNING - pt_offset_label 修正后仍然很大 (max=26.00)，可能仍有单位问题！
+2026-01-05 00:56:45,628 - WARNING - pt_offset_label 修正后仍然很大 (max=33.34)，可能仍有单位问题！
+2026-01-05 00:56:50,104 - WARNING - pt_offset_label 修正后仍然很大 (max=35.60)，可能仍有单位问题！
+2026-01-05 00:56:50,489 - INFO - [DEBUG] forward_grouping: 生成了 99949 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:50,533 - INFO - [DEBUG] instance_loss: proposals=1, gts=16, max_iou=0.0734, mean_iou=0.0734, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:56:50,977 - INFO - [DEBUG] forward_grouping: 生成了 96755 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:51,020 - INFO - [DEBUG] instance_loss: proposals=5, gts=4, max_iou=0.0706, mean_iou=0.0231, pos_iou_thr=0.1, pos_count=0
+2026-01-05 00:56:51,453 - INFO - [DEBUG] forward_grouping: 生成了 87111 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:56:51,489 - INFO - [DEBUG] instance_loss: proposals=37, gts=2, max_iou=0.2471, mean_iou=0.0068, pos_iou_thr=0.1, pos_count=1
+2026-01-05 00:56:51,489 - INFO - [DEBUG] instance_loss: low_quality匹配增加了 2 个正样本 (min_pos_thr=0.1)
+2026-01-05 00:56:51,552 - INFO - Epoch [1/108][40/40]  lr: 0.002, eta: 4:03:18, mem: 1703, data_time: 0.00, iter_time: 0.47, semantic_loss: 0.0880, offset_loss: 3.3739, cls_loss: 0.1662, mask_loss: 0.1144, iou_score_loss: 0.0000, num_pos: 1.0000, num_neg: 36.0000, loss: 3.7425
+2026-01-05 00:56:51,975 - INFO - Validation
+  0%|          | 0/11 [00:00<?, ?it/s]2026-01-05 00:56:54,983 - WARNING - pt_offset_label 修正后仍然很大 (max=13.88)，可能仍有单位问题！
+2026-01-05 00:57:04,197 - WARNING - pt_offset_label 修正后仍然很大 (max=13.35)，可能仍有单位问题！
+2026-01-05 00:57:04,722 - INFO - [DEBUG] forward_grouping: 生成了 55553 个proposals, radius=20, score_thr=0.05
+2026-01-05 00:57:04,742 - INFO - [DEBUG get_instances] mask_scores (after sigmoid): min=0.0000, max=0.3593, mean=0.0906, thr=0.0001
+2026-01-05 00:57:04,742 - INFO - [DEBUG get_instances] Before mask filter: 55553 proposals
+2026-01-05 00:57:04,751 - INFO - [DEBUG get_instances] After mask filter: 54996 proposals
+2026-01-05 00:57:04,752 - INFO - [DEBUG get_instances] cls_scores: min=0.0903, max=0.7664, mean=0.4371, thr=0.01
+2026-01-05 00:57:04,752 - INFO - [DEBUG get_instances] Before cls filter: 798 proposals
+2026-01-05 00:57:04,752 - INFO - [DEBUG get_instances] After cls filter: 798 proposals
+2026-01-05 00:57:04,815 - INFO - [DEBUG get_instances] npoint: min=10, max=4495, mean=68.9, thr=1
+2026-01-05 00:57:04,815 - INFO - [DEBUG get_instances] Before npoint filter: 798 proposals
+2026-01-05 00:57:04,815 - INFO - [DEBUG get_instances] After npoint filter: 798 proposals
+  9%|▉         | 1/11 [00:18<03:03, 18.32s/it]2026-01-05 00:57:14,371 - WARNING - pt_offset_label 修正后仍然很大 (max=13.26)，可能仍有单位问题！
+2026-01-05 00:57:27,061 - WARNING - pt_offset_label 修正后仍然很大 (max=13.63)，可能仍有单位问题！
+Traceback (most recent call last):
+  File "/root/autodl-tmp/SoftGroup/tools/train.py", line 214, in <module>
+    main()
+  File "/root/autodl-tmp/SoftGroup/tools/train.py", line 209, in main
+    validate(epoch, model, val_loader, cfg, logger, writer)
+  File "/root/autodl-tmp/SoftGroup/tools/train.py", line 102, in validate
+    result = model(batch)
+  File "/root/miniconda3/envs/newsoftgrouppp/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1110, in _call_impl
+    return forward_call(*input, **kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 110, in forward
+    return self.forward_test(**batch)
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/utils.py", line 171, in wrapper
+    return func(*new_args, **new_kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 375, in forward_test
+    proposals_idx, proposals_offset = self.forward_grouping(
+  File "/root/autodl-tmp/SoftGroup/softgroup/util/fp16.py", line 58, in new_func
+    output = old_func(*new_args, **new_kwargs)
+  File "/root/autodl-tmp/SoftGroup/softgroup/model/softgroup.py", line 491, in forward_grouping
+    neighbor_inds, start_len = ball_query(
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 55, in ball_query
+    return octree_ball_query(coords, mean_active, radius)
+  File "/root/autodl-tmp/SoftGroup/softgroup/ops/functions.py", line 83, in octree_ball_query
+    n_totals = _get_ops().octree_ball_query(coords, boxes, pt_inds, pt_start_len, out_inds,
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call,so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1.
+  9%|▉         | 1/11 [00:39<06:36, 39.68s/it]
