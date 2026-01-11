@@ -2,11 +2,10 @@ model:
   channels: 32
   num_blocks: 5       # [保持] 6层结构，节省显存
   semantic_classes: 3 # 0=low_veg, 1=terrain, 2=tree
-  instance_classes: 1 # tree (实例类别索引0)
-  # sem2ins_classes: [] # 不使用sem2ins，因为每棵树都需要聚类分割（不是每个场景只有一棵树）
-  # 注意：sem2ins_classes应该是实例类别索引，不是语义类别索引
-  # 原配置[2]是语义类别索引，不会匹配到实例类别索引范围[0, instance_classes)，已修复为空列表
-  sem2ins_classes: []
+  instance_classes: 3 # 0=low_veg, 1=terrain, 2=tree (三个类别都可以有实例)
+  # sem2ins_classes: [2] 表示语义类别2（tree）直接映射到实例，不需要聚类
+  # 这是语义类别索引，不是实例类别索引
+  sem2ins_classes: [2]
   semantic_only: False
   semantic_weight: [2.0, 2.0, 1.0] # [保持] 应对类别不平衡
   ignore_label: -100
