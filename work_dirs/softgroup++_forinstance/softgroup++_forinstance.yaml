@@ -1,0 +1,116 @@
+model:
+  channels: 32
+  num_blocks: 5       # [保持] 6层结构，节省显存
+  semantic_classes: 3 # 0=low_veg, 1=terrain, 2=tree
+  instance_classes: 3 # 0=low_veg, 1=terrain, 2=tree (三个类别都可以有实例)
+  # sem2ins_classes: [2] 表示语义类别2（tree）直接映射到实例，不需要聚类
+  # 这是语义类别索引，不是实例类别索引
+  sem2ins_classes: [2]
+  semantic_only: False
+  semantic_weight: [2.0, 2.0, 1.0] # [保持] 应对类别不平衡
+  ignore_label: -100
+  with_coords: True
+
+  grouping_cfg:
+    with_pyramid: False
+    pyramid_base_size: 20
+    with_octree: True
+    
+    # [关键修改 1] 降低语义阈值
+    # 森林环境复杂，0.1 能召回更多细小的树枝，防止漏检
+    score_thr: 0.1 
+    
+    # [关键修改 2] 调整聚类半径
+    # 0.3m (3个体素) 是一个平衡点。
+    # 太小(0.2)会导致树冠碎裂；太大(0.6)会导致粘连。
+    radius: 0.3     
+    
+    # [关键修改 3] 恢复 Mean Active
+    # 300 是安全值，避免密集区域聚类失败
+    mean_active: 300 
+    
+    class_numpoint_mean: [-1., -1., -1.]
+    npoint_thr: 20     # 忽略少于20个点的噪点簇
+    ignore_classes: [0, 1] 
+
+  instance_voxel_cfg:
+    scale: 10            # 10cm 体素
+    # [关键修改 4] 修复 spconv 报错
+    # 必须是 32 的倍数。416 足够覆盖 35m 切块。
+    spatial_shape: 416   
+
+  train_cfg:
+    lvl_fusion: True
+    max_proposal_num: 500 # 森林切块内树木一般不超过500棵
+    pos_iou_thr: 0.1
+    match_low_quality: True
+    min_pos_thr: 0.1
+
+  test_cfg:
+    x4_split: False
+    cls_score_thr: 0.01 
+    mask_score_thr: 0.0001
+    min_npoint: 10     # 预测时忽略极小的碎片
+    eval_tasks: ['semantic', 'instance']
+  fixed_modules: []
+
+data:
+  train:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance/preprocess_tiled' # 指向切好块的数据路径
+    prefix: 'train'
+    suffix: '.pth'  # 注意：预处理生成的是 .pth
+    training: True
+    repeat: 4       # 增加数据采样频率
+    
+    voxel_cfg:
+      scale: 10     # 10cm 体素
+      
+      # [关键修改 5] 彻底解决 "points vanished" 报错
+      # 1. 必须是 32 的倍数 (416 / 32 = 13)
+      # 2. 必须大于切块大小 (35m = 350 < 416)
+      # 3. 三维都写上，防止 Z 轴被自动压缩导致报错
+      spatial_shape: [416, 416, 416] 
+      
+      max_npoint: 150000 # 35m 大切块点数较多，给足空间
+      min_npoint: 1000   # 忽略稀疏的无效块
+      
+  test:
+    type: 'forinstance'
+    data_root: 'dataset/forinstance/preprocess_tiled'
+    prefix: 'val'
+    suffix: '.pth'
+    training: False
+    voxel_cfg:
+      scale: 10
+      # [关键修改 6] 测试集也要同步修改，否则无法推理
+      spatial_shape: [416, 416, 416] 
+      max_npoint: 150000
+      min_npoint: 1000
+
+dataloader:
+  train:
+    batch_size: 1      # 必须是 1，配合 Group Norm 使用
+    num_workers: 4     # 4个进程加速数据加载
+  test:
+    batch_size: 1
+    num_workers: 2
+
+optimizer:
+  type: 'Adam'
+  lr: 0.002 
+
+loss_weights:
+  semantic_loss: 1.0
+  # [关键修改 7] 提高 Offset 权重
+  # 因为改用了“树干引导”，我们希望模型更用力地学习“指向树心”
+  offset_loss: 1.5   
+  cls_loss: 1.0
+  mask_loss: 1.0
+  iou_score_loss: 1.0
+
+fp16: False         # 森林坐标数值大，必须关掉 FP16 防止溢出
+epochs: 108
+step_epoch: 40      # 延后衰减，让模型多学一会儿
+save_freq: 4
+log_interval: 50    # 减少日志刷屏
