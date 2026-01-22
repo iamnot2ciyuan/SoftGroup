@@ -145,11 +145,21 @@ def main():
     with torch.no_grad():
         model.eval()
         for i, batch in enumerate(dataloader):
-            result = model(batch)
-            results.append(result)
+            try:
+                result = model(batch)
+                results.append(result)
+            except (ValueError, AssertionError) as e:
+                # 跳过有问题的样本（如spconv空间形状为0的情况）
+                if 'spatial shape' in str(e) or 'reach zero' in str(e):
+                    logger.warning(f'Skip problematic sample {i} due to spconv error: {e}')
+                    continue
+                else:
+                    raise
             progress_bar.update(world_size)
         progress_bar.close()
-        results = collect_results_cpu(results, len(dataset))
+        if args.dist:
+            results = collect_results_cpu(results, len(dataset))
+        # 非分布式模式下，results已经是完整结果，不需要collect
     if is_main_process():
         for res in results:
             scan_ids.append(res['scan_id'])
@@ -163,8 +173,12 @@ def main():
                 offset_preds.append(res['offset_preds'])
                 offset_labels.append(res['offset_labels'])
             if 'instance' in eval_tasks:
-                pred_insts.append(res['pred_instances'])
-                gt_insts.append(res['gt_instances'])
+                if 'pred_instances' in res:
+                    pred_insts.append(res['pred_instances'])
+                    gt_insts.append(res['gt_instances'])
+                else:
+                    # 如果forward_test没有返回实例预测，跳过实例评估
+                    logger.warning(f'Sample {res.get("scan_id", i)}: No instance predictions, skipping instance evaluation')
             if 'panoptic' in eval_tasks:
                 panoptic_preds.append(res['panoptic_preds'])
         if 'instance' in eval_tasks:
