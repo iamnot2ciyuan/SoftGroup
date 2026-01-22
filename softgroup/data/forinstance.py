@@ -192,7 +192,7 @@ class FORInstanceDataset(CustomDataset):
     def getInstanceInfo(self, xyz, instance_label, semantic_label):
         """
         获取实例信息
-        🚨 修复3: 确保语义类别映射正确
+        🚨 [核心修改] 实现0.5米树干质心约束
         """
         # 注意：instance_label现在是 class_id * 1000 + instance_id 格式
         # getInstanceInfo期望连续的实例ID（0,1,2,...），所以需要先转换
@@ -208,64 +208,67 @@ class FORInstanceDataset(CustomDataset):
         for inst_id, new_id in inst_id_map.items():
             instance_label_continuous[instance_label == inst_id] = new_id
         
-        # 调用父类方法
-        # 注意：传入的 xyz 应该是 xyz_middle（体素单位）
-        # 父类会计算 pt_offset_label = pt_mean - xyz，所以 pt_offset_label 也应该是体素单位
-        ret = super().getInstanceInfo(xyz, instance_label_continuous, semantic_label)
-        instance_num, instance_pointnum, instance_cls, pt_offset_label = ret
+        # 🚨🚨🚨 [核心修改] 实现0.5米树干质心约束 🚨🚨🚨
+        # 注意：xyz 是 xyz_middle（体素单位），需要转换为米单位来计算0.5米约束
+        scale = self.voxel_cfg.scale if self.voxel_cfg else 10.0
+        xyz_meters = xyz / scale  # 转换为米单位
         
-        # 🚨🚨🚨 [核心修复] 修正 pt_offset_label 的单位 🚨🚨🚨
-        # 根据代码逻辑：
-        # 1. xyz_middle 在 getInstanceInfo 调用时已经是体素单位（因为 xyz = xyz * scale）
-        # 2. pt_offset_label = pt_mean - xyz_middle，所以也应该是体素单位
-        # 3. 但如果 xyz_middle 在某些情况下仍然是米单位，pt_offset_label 也会是米单位
-        # 4. 需要确保 pt_offset_label 始终是体素单位，以便与网络输出的 pt_offsets 匹配
+        pt_mean = np.ones((xyz.shape[0], 3), dtype=np.float32) * -100.0
+        instance_pointnum = []
+        instance_cls = []
+        instance_num = max(int(instance_label_continuous.max()) + 1, 0)
         
-        # 🚨 确保 scale 存在且有效
-        if self.voxel_cfg is None or not hasattr(self.voxel_cfg, 'scale'):
-            import logging
-            logger = logging.getLogger()
-            logger.error("voxel_cfg.scale 不存在！无法修正 pt_offset_label 单位！")
-        else:
-            scale = self.voxel_cfg.scale
-            # 🚨 [核心修复] 检查并修正 pt_offset_label 的单位
-            # 如果 pt_offset_label 的最大值 > 10.0（体素单位），说明可能是米单位，需要除以 scale
-            # 正常情况下，体素单位的 offset 应该在 [-5, 5] 范围内（对于 0.5 米的实例中心偏移）
-            if isinstance(pt_offset_label, np.ndarray) and pt_offset_label.size > 0:
-                max_offset = np.abs(pt_offset_label).max()
-                # 如果 offset 很大（> 10.0），可能是米单位，需要转换为体素单位
-                # 对于 10cm 体素，10.0 体素 = 1.0 米，这是合理的偏移范围上限
-                # 如果 offset > 10.0，很可能是米单位，需要除以 scale
-                if max_offset > 10.0:
-                    import logging
-                    logger = logging.getLogger()
-                    logger.warning(f"pt_offset_label 数值过大 (max={max_offset:.2f})，可能是米单位，正在转换为体素单位...")
-                    pt_offset_label = pt_offset_label / scale
-                    max_offset_after = np.abs(pt_offset_label).max()
-                    if max_offset_after > 10.0:
-                        logger.warning(f"pt_offset_label 转换后仍然很大 (max={max_offset_after:.2f})，可能仍有单位问题！")
-                    else:
-                        logger.info(f"pt_offset_label 单位修正成功: {max_offset:.2f} -> {max_offset_after:.2f}")
-                # 如果 offset 在合理范围内（<= 10.0），假设已经是体素单位，不需要转换
-                # 但为了安全，仍然检查是否异常大（> 5.0），这可能表示单位问题
-                elif max_offset > 5.0:
-                    import logging
-                    logger = logging.getLogger()
-                    logger.warning(f"pt_offset_label 数值较大 (max={max_offset:.2f})，请检查单位是否正确")
+        for i_ in range(instance_num):
+            inst_idx_i = np.where(instance_label_continuous == i_)
+            if inst_idx_i[0].size == 0:
+                continue
+                
+            xyz_i_meters = xyz_meters[inst_idx_i]  # 米单位
+            
+            # 🚨 提取底部0.5米的点（树干部分）
+            # 1. 找到最小Z值（抗噪：使用第3小的Z值作为基准）
+            if len(xyz_i_meters) > 10:
+                k = min(3, len(xyz_i_meters) - 1)
+                min_z = np.partition(xyz_i_meters[:, 2], k)[k]
+            else:
+                min_z = xyz_i_meters[:, 2].min()
+            
+            # 2. 截取底部0.5米范围的点
+            base_mask = xyz_i_meters[:, 2] <= (min_z + 0.5)
+            base_points = xyz_i_meters[base_mask]
+            
+            if len(base_points) > 0:
+                # 3. 计算树干质心（米单位）
+                stem_center_meters = np.mean(base_points, axis=0)
+                # 转换为体素单位
+                stem_center = stem_center_meters * scale
+                pt_mean[inst_idx_i] = stem_center
+            else:
+                # 如果找不到树基（比如树被切断只剩树冠），使用整棵树的质心作为fallback
+                pt_mean[inst_idx_i] = xyz_i_meters.mean(0) * scale
+            
+            instance_pointnum.append(inst_idx_i[0].size)
+            cls_idx = inst_idx_i[0][0]
+            instance_cls.append(semantic_label[cls_idx])
+        
+        # 计算 offset label（体素单位）
+        # pt_mean 和 xyz 都是体素单位，所以 pt_offset_label 也是体素单位
+        pt_offset_label = pt_mean - xyz
         
         # 🚨 修复3: instance_cls应该是实例类别编号（0-based），不是语义类别编号
-        # 配置中instance_classes=1，只有树类别需要实例分割
-        # 语义类别2（tree）应该映射到实例类别0（因为语义标签是0-based：0=low_veg, 1=terrain, 2=tree）
-        # 注意：只有语义类别2（树）才需要实例分割，其他类别（0,1）不应该有实例
-        # 如果instance_cls中有非2的值，说明数据有问题，应该设为-100（忽略）
-        instance_cls = [0 if x == 2 else -100 for x in instance_cls]  # 树(语义2) -> 实例类别0
+        # 配置中instance_classes=3，但实际只有树需要实例分割
+        # 语义类别2（tree）应该映射到实例类别2（因为语义标签是0-based：0=low_veg, 1=terrain, 2=tree）
+        # instance_cls 已经是从 semantic_label 获取的，所以树(语义2) -> 实例类别2
+        # 但根据实际需求，只有树需要实例分割，所以将非树类别设为-100
+        # 注意：如果配置中instance_classes=3，则保持原样；如果instance_classes=1，则映射为0
+        # 这里根据配置保持原样，因为instance_classes=3
         
-        # 验证：确保所有有效的实例都是树类别（语义3）
+        # 验证：确保所有有效的实例都是树类别（语义2）
         # 如果发现非树类别的实例，记录警告（但不影响训练）
         if len(instance_cls) > 0:
             valid_instances = [i for i, cls in enumerate(instance_cls) if cls != -100]
             if len(valid_instances) > 0:
-                # 检查对应的语义标签是否都是3
+                # 检查对应的语义标签是否都是2（树）
                 for inst_idx in valid_instances:
                     # 找到该实例对应的点
                     inst_mask = (instance_label_continuous == inst_idx)
@@ -277,6 +280,5 @@ class FORInstanceDataset(CustomDataset):
                             logger = logging.getLogger()
                             logger.warning(f"实例 {inst_idx} 包含非树类别的语义标签: {inst_sem_labels}")
         
-        # 🚨 返回时确保 pt_offset_label 没有乘 scale
         return instance_num, instance_pointnum, instance_cls, pt_offset_label
 

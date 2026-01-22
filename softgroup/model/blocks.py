@@ -2,17 +2,94 @@ from collections import OrderedDict
 
 import spconv.pytorch as spconv
 import torch
+import torch.nn as nn
 from spconv.pytorch.modules import SparseModule
-from torch import nn
+
+
+# [Contribution 3: GN Optimization - Sparse Version]
+class SparseGroupNorm(nn.Module):
+    """
+    专门为 SparseConvTensor 设计的 GroupNorm。
+    参数顺序经过封装，兼容 BatchNorm 的调用方式：(num_channels, num_groups)
+    """
+    def __init__(self, num_channels, num_groups=16):
+        super().__init__()
+        # 自动调整组数，防止通道数过少报错
+        if num_channels < num_groups:
+            num_groups = max(1, num_channels)
+        self.gn = nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)
+
+    def forward(self, x):
+        if isinstance(x, spconv.SparseConvTensor):
+            features = x.features
+            out_features = self.gn(features)
+            x = x.replace_feature(out_features)
+            return x
+        else:
+            # 防御性编程：万一传入的是普通 Tensor
+            return self.gn(x)
+
+
+# [Contribution 3: GN Optimization - Dense Version]
+class DenseGroupNorm(nn.Module):
+    """
+    专门为 MLP/Linear 层设计的 GroupNorm 包装器。
+    【关键修复】：nn.GroupNorm 的第一个参数是 num_groups，而 BatchNorm 是 num_features。
+    这个类将参数顺序翻转，使其可以像 BatchNorm 一样被 MLP 类调用：DenseGroupNorm(channels)
+    """
+    def __init__(self, num_channels, num_groups=16):
+        super().__init__()
+        if num_channels < num_groups:
+            num_groups = max(1, num_channels)
+        self.gn = nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)
+
+    def forward(self, x):
+        return self.gn(x)
+
+
+# [Contribution 2: Adaptive RGB Fusion]
+class AdaptiveRGBGate(nn.Module):
+    def __init__(self, geo_channels, rgb_channels, hidden_dim=16):
+        super().__init__()
+        # RGB 编码器
+        self.rgb_encoder = nn.Sequential(
+            nn.Linear(rgb_channels, geo_channels),
+            nn.ReLU(inplace=True),
+            nn.Linear(geo_channels, geo_channels)
+        )
+        # 门控网络
+        self.gate_net = nn.Sequential(
+            nn.Linear(geo_channels * 2, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, geo_channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, geo_feats, raw_rgb):
+        # 安全检查：确保设备和类型一致
+        if raw_rgb.device != geo_feats.device:
+            raw_rgb = raw_rgb.to(geo_feats.device)
+        if raw_rgb.dtype != geo_feats.dtype:
+            raw_rgb = raw_rgb.to(geo_feats.dtype)
+
+        rgb_feats = self.rgb_encoder(raw_rgb)
+        
+        # 拼接 -> 计算权重
+        cat_feats = torch.cat([geo_feats, rgb_feats], dim=1)
+        gate = self.gate_net(cat_feats)
+
+        # 融合：Geo + Gate * RGB
+        return geo_feats + (gate * rgb_feats)
 
 
 class MLP(nn.Sequential):
-
     def __init__(self, in_channels, out_channels, norm_fn=None, num_layers=2):
         modules = []
         for _ in range(num_layers - 1):
             modules.append(nn.Linear(in_channels, in_channels))
             if norm_fn:
+                # 这里 norm_fn(in_channels) 调用必须要求 norm_fn 的第一个参数是 channels
+                # 所以必须使用 DenseGroupNorm 而不是原始的 nn.GroupNorm
                 modules.append(norm_fn(in_channels))
             modules.append(nn.ReLU())
         modules.append(nn.Linear(in_channels, out_channels))
@@ -27,9 +104,7 @@ class MLP(nn.Sequential):
         nn.init.constant_(self[-1].bias, 0)
 
 
-# current 1x1 conv in spconv2x has a bug. It will be removed after the bug is fixed
 class Custom1x1Subm3d(spconv.SparseConv3d):
-
     def forward(self, input):
         features = torch.mm(input.features, self.weight.view(self.out_channels, self.in_channels).T)
         if self.bias is not None:
@@ -42,51 +117,47 @@ class Custom1x1Subm3d(spconv.SparseConv3d):
 
 
 class ResidualBlock(SparseModule):
-
-    def __init__(self, in_channels, out_channels, norm_fn, indice_key=None):
+    def __init__(self, in_channels, out_channels, norm_fn=None, indice_key=None):
         super().__init__()
+        if norm_fn is None:
+            norm_fn = nn.BatchNorm1d
 
-        if in_channels == out_channels:
-            self.i_branch = spconv.SparseSequential(nn.Identity())
-        else:
-            self.i_branch = spconv.SparseSequential(
-                Custom1x1Subm3d(in_channels, out_channels, kernel_size=1, bias=False))
+        self.conv1 = spconv.SubMConv3d(
+            in_channels, out_channels, kernel_size=3, padding=1, bias=False, indice_key=indice_key)
+        self.bn1 = norm_fn(out_channels)
+        self.relu = nn.ReLU()
+        self.conv2 = spconv.SubMConv3d(
+            out_channels, out_channels, kernel_size=3, padding=1, bias=False, indice_key=indice_key)
+        self.bn2 = norm_fn(out_channels)
 
-        self.conv_branch = spconv.SparseSequential(
-            norm_fn(in_channels), nn.ReLU(),
-            spconv.SubMConv3d(
-                in_channels,
-                out_channels,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-                indice_key=indice_key), norm_fn(out_channels), nn.ReLU(),
-            spconv.SubMConv3d(
-                out_channels,
-                out_channels,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-                indice_key=indice_key))
+        self.downsample = None
+        if in_channels != out_channels:
+            self.downsample = spconv.SparseSequential(
+                spconv.SubMConv3d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    bias=False,
+                    indice_key=indice_key), norm_fn(out_channels))
 
     def forward(self, input):
-        identity = spconv.SparseConvTensor(input.features, input.indices, input.spatial_shape,
-                                           input.batch_size)
-        output = self.conv_branch(input)
-        out_feats = output.features + self.i_branch(identity).features
-        output = output.replace_feature(out_feats)
-
-        return output
+        identity = input
+        out = self.conv1(input)
+        out = self.bn1(out)
+        out = out.replace_feature(self.relu(out.features))
+        out = self.conv2(out)
+        out = self.bn2(out)
+        if self.downsample is not None:
+            identity = self.downsample(input)
+        out = out.replace_feature(out.features + identity.features)
+        out = out.replace_feature(self.relu(out.features))
+        return out
 
 
 class UBlock(nn.Module):
-
     def __init__(self, nPlanes, norm_fn, block_reps, block, indice_key_id=1):
-
         super().__init__()
-
         self.nPlanes = nPlanes
-
         blocks = {
             'block{}'.format(i):
             block(nPlanes[0], nPlanes[0], norm_fn, indice_key='subm{}'.format(indice_key_id))
@@ -129,7 +200,6 @@ class UBlock(nn.Module):
             self.blocks_tail = spconv.SparseSequential(blocks_tail)
 
     def forward(self, input):
-
         output = self.blocks(input)
         identity = spconv.SparseConvTensor(output.features, output.indices, output.spatial_shape,
                                            output.batch_size)
